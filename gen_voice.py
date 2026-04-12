@@ -22,10 +22,14 @@ TARGET_RATE = 8000   # STM32 I2S 샘플레이트
 #   (name, voice_gender, text)
 #   KO = Microsoft Heami
 CLIPS = [
+    ("intro",        "KO", "이장치는 디에스이 아이엔시의   디아지 팁용   프로그래머 입니다"),
     ("place_board",  "KO", "디아지용 팁 보드를 올려주세요"),
     ("complete",     "KO", "프로그램이 완료되었습니다"),
     ("defective",    "KO", "적색 표시는 불량입니다"),
     ("remove_board", "KO", "보드를 분리하여 주십시요"),
+    ("is_93c56",      "KO", "93 C 56 보드입니다"),
+    ("is_93c46",      "KO", "93 C 46 보드입니다"),
+    ("board_removed", "KO", "보드가 분리되었습니다"),
 ]
 
 # ── SAPI5 화자 ID 수집 ───────────────────────────────────────
@@ -70,6 +74,7 @@ def wav_to_pcm(wav_path):
     n_src = len(pcm)
     n_dst = int(n_src * TARGET_RATE / src_rate)
     pcm_8k = np.interp(np.linspace(0, n_src - 1, n_dst), np.arange(n_src), pcm)
+    pcm_8k = pcm_8k * 3.0   # 음량 3배 증폭
     return np.clip(pcm_8k, -32768, 32767).astype(np.int16).tolist()
 
 # ── 각 클립 생성 (win32com: 매 호출마다 독립 SpFileStream) ──
@@ -129,8 +134,10 @@ os.makedirs(os.path.dirname(OUTPUT_C), exist_ok=True)
 with open(OUTPUT_C, "w", encoding="utf-8") as f:
     f.write("\n".join(lines))
 
-# ── H 파일 생성 ──────────────────────────────────────────────
-print(f"{OUTPUT_H} 생성 중...")
+# ── H 파일은 수동 관리 (덮어쓰기 안 함) ─────────────────────
+print(f"{OUTPUT_H} 은 수동 관리 파일 → 건드리지 않음")
+if False:  # H 파일 자동생성 비활성화
+  print(f"{OUTPUT_H} 생성 중...")
 h_src = """\
 #ifndef VOICE_DATA_H
 #define VOICE_DATA_H

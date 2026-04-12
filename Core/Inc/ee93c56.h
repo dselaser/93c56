@@ -7,9 +7,18 @@
 
 /* ── 93C56 Configuration ─────────────────────────────────────── */
 #define EE_NUM_CHIPS        12
-#define EE_WORD_BITS        16      /* x16 organisation: 128 x 16-bit */
-#define EE_ADDR_BITS        7       /* 7-bit address for x16 */
-#define EE_NUM_ADDRS        128     /* 128 words per chip */
+#define EE_WORD_BITS        8       /* x8 organisation */
+
+/* 93C46: 7-bit addr, 128 bytes  /  93C56: 8-bit addr, 256 bytes */
+typedef enum {
+    EE_CHIP_UNKNOWN = 0,
+    EE_CHIP_93C46,      /* 1Kbit: 128 x 8 */
+    EE_CHIP_93C56,      /* 2Kbit: 256 x 8 */
+} EE_ChipType;
+
+extern volatile EE_ChipType g_chip_type;
+extern volatile uint8_t     g_addr_bits;   /* 7 or 8 */
+extern volatile uint16_t    g_num_addrs;   /* 128 or 256 */
 
 /* ── GPIO Pin Definitions ────────────────────────────────────── */
 
@@ -70,21 +79,24 @@ void EE_WriteEnable(uint8_t idx);
 /** Disable erase/write operations on chip idx */
 void EE_WriteDisable(uint8_t idx);
 
-/** Read one 16-bit word from chip idx at given address */
-uint16_t EE_Read(uint8_t idx, uint8_t addr);
+/** Read one 8-bit byte from chip idx at given address */
+uint8_t EE_Read(uint8_t idx, uint8_t addr);
 
-/** Write one 16-bit word to chip idx at given address.
+/** Write one 8-bit byte to chip idx at given address.
  *  Returns true if write completed successfully. */
-bool EE_Write(uint8_t idx, uint8_t addr, uint16_t data);
+bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data);
 
 /** Detect if chip idx is present (pogo pin connected).
  *  Tries a read and checks for valid response. */
 bool EE_Detect(uint8_t idx);
 
-/** 읽기 전용 감지 (쓰기 없음, 포그핀 불안정 시 안전).
- *  주소 0과 64를 읽어서 응답 유무로 판단.
- *  detectTask 용 — 포그핀 접촉 불안정 상태에서도 안전. */
+/** 읽기 전용 감지 (쓰기 없음, 포그핀 불안정 시 안전). */
 bool EE_DetectReadOnly(uint8_t idx);
+
+/** 칩 종류 식별 (93C46 vs 93C56).
+ *  보드 안정 감지 후 1회 호출. 결과를 g_chip_type 등에 설정.
+ *  Returns: EE_CHIP_93C46 or EE_CHIP_93C56 or EE_CHIP_UNKNOWN */
+EE_ChipType EE_IdentifyChip(void);
 
 /** Test all memory cells of chip idx by writing/reading 0xAAAA and 0x5555.
  *  Returns true if all cells pass. */

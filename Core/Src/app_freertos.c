@@ -231,10 +231,16 @@ void StartMainAppTask(void *argument)
     uint32_t last_voice_tick;       /* 음성 반복 타이머 */
     bool any_defective;
 
+    /* ── 전원 ON 인트로 (최초 1회) ──────────────── */
+    voice_play(VOICE_INTRO);
+    osDelay(300);
+    voice_play(VOICE_PLACE_BOARD);
+    osDelay(300);
+
     for (;;)
     {
         /* ════════════════════════════════════════════════════════
-         * 상태 A: LED 순차 점등 → 외곽 회전 쇼 → 음성 반복
+         * 상태 A: LED 순차 점등 → LED 쇼 → 음성 반복
          * ════════════════════════════════════════════════════════ */
 
         /* ── 색상 팔레트 (등휘도 보정) ────────────────────── */
@@ -451,6 +457,16 @@ void StartMainAppTask(void *argument)
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++)
             detected[i] = g_detected[i];
 
+        /* ── 칩 종류 식별 (93C46 vs 93C56) ─────────── */
+        {
+            EE_ChipType chip = EE_IdentifyChip();
+            if (chip == EE_CHIP_93C56)
+                voice_play(VOICE_IS_93C56);
+            else if (chip == EE_CHIP_93C46)
+                voice_play(VOICE_IS_93C46);
+            osDelay(500);
+        }
+
         /* ════════════════════════════════════════════════════════
          * 상태 B: 보드 감지 확인 (최종 상태 표시)
          * ════════════════════════════════════════════════════════ */
@@ -522,7 +538,8 @@ void StartMainAppTask(void *argument)
             voice_play(VOICE_DEFECTIVE);
         }
 
-        osDelay(1000);
+        /* "보드를 분리하여 주십시요" */
+        osDelay(500);
         voice_play(VOICE_REMOVE_BOARD);
 
         /* 보드 제거 감지: detectTask 활용 */
@@ -532,8 +549,7 @@ void StartMainAppTask(void *argument)
             uint8_t voice_count = 0;
             while (g_board_present) {
                 osDelay(500);
-                /* 5회(2.5초)마다 음성 반복 체크 → 약 30초 간격 */
-                if (++voice_count >= 60) {   /* 60 × 0.5s = 30s */
+                if (++voice_count >= 60) {   /* 30초마다 반복 */
                     voice_play(VOICE_REMOVE_BOARD);
                     voice_count = 0;
                 }
@@ -541,7 +557,11 @@ void StartMainAppTask(void *argument)
         }
         g_detect_enable = false;
 
-        /* 전체 소등 후 상태 A로 복귀 */
+        /* "보드가 분리되었습니다" */
+        voice_play(VOICE_BOARD_REMOVED);
+        osDelay(300);
+
+        /* 전체 소등 후 LED 쇼(상태 A)로 복귀 */
         led_all_off();
         osDelay(500);
 

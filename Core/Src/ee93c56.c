@@ -1,18 +1,19 @@
 /**
- * ee93c56.c — 93C56 Microwire EEPROM bit-bang driver
+ * ee93c56.c — 93C46/93C56 Microwire EEPROM bit-bang driver
  *
- * 93C56 x16 mode: 128 words × 16-bit = 256 bytes per chip
- * 12 chips on memory board, accessed via CD4067 analog mux for DO lines.
+ * 93C46 x8: 128 x 8-bit, 7-bit addr  (1Kbit)
+ * 93C56 x8: 256 x 8-bit, 8-bit addr  (2Kbit)
  *
- * Microwire command format (x16):
- *   START_BIT(1) + OPCODE(2) + ADDRESS(7) [+ DATA(16)]
- *
- * Opcodes:
- *   READ  = 10   WRITE = 01   ERASE = 11
- *   EWEN  = 00 + 11xxxxx      EWDS  = 00 + 00xxxxx
+ * Microwire command format (x8):
+ *   START_BIT(1) + OPCODE(2) + ADDRESS(7 or 8) [+ DATA(8)]
  */
 
 #include "ee93c56.h"
+
+/* ── 칩 종류 전역 변수 (기본값: 93C56) ───────────────────────── */
+volatile EE_ChipType g_chip_type = EE_CHIP_UNKNOWN;
+volatile uint8_t     g_addr_bits = 8;     /* 93C56 기본 */
+volatile uint16_t    g_num_addrs = 256;   /* 93C56 기본 */
 
 /* ── CS Pin Table ────────────────────────────────────────────── */
 const EE_CSPin ee_cs_table[EE_NUM_CHIPS] = {
@@ -70,16 +71,14 @@ static uint8_t ee_recv_bit(void)
     return bit;
 }
 
-/* Send start bit + opcode(2) + address(7) */
+/* Send start bit + opcode(2) + address(g_addr_bits) */
 static void ee_send_command(uint8_t opcode, uint8_t addr)
 {
-    /* Start bit */
-    ee_send_bit(1);
-    /* Opcode: 2 bits MSB first */
-    ee_send_bit((opcode >> 1) & 1);
-    ee_send_bit(opcode & 1);
-    /* Address: 7 bits MSB first */
-    for (int i = EE_ADDR_BITS - 1; i >= 0; i--)
+    ee_send_bit(1);  /* Start bit */
+    ee_send_bit((opcode >> 1) & 1);  /* Opcode MSB */
+    ee_send_bit(opcode & 1);         /* Opcode LSB */
+    /* Address: g_addr_bits (7 for 93C46, 8 for 93C56) */
+    for (int i = g_addr_bits - 1; i >= 0; i--)
         ee_send_bit((addr >> i) & 1);
 }
 
@@ -207,13 +206,13 @@ void EE_WriteEnable(uint8_t idx)
     EE_CS_High(idx);
     ee_delay();
 
-    /* EWEN: SB(1) + 00 + 11_00000 */
-    ee_send_bit(1);     /* start */
-    ee_send_bit(0);     /* opcode 00 */
-    ee_send_bit(0);
-    ee_send_bit(1);     /* 11xxxxx */
+    /* EWEN: SB(1) + 00 + 11 + (addr_bits-2)개 0 */
     ee_send_bit(1);
-    for (int i = 0; i < 5; i++)
+    ee_send_bit(0);
+    ee_send_bit(0);
+    ee_send_bit(1);
+    ee_send_bit(1);
+    for (int i = 0; i < (int)g_addr_bits - 2; i++)
         ee_send_bit(0);
 
     EE_CS_Low(idx);
@@ -231,11 +230,11 @@ void EE_WriteDisable(uint8_t idx)
     EE_CS_High(idx);
     ee_delay();
 
-    /* EWDS: SB(1) + 00 + 00_00000 */
+    /* EWDS: SB(1) + 00 + addr_bits개 0 */
     ee_send_bit(1);
     ee_send_bit(0);
     ee_send_bit(0);
-    for (int i = 0; i < 7; i++)
+    for (int i = 0; i < (int)g_addr_bits; i++)
         ee_send_bit(0);
 
     EE_CS_Low(idx);
@@ -243,8 +242,8 @@ void EE_WriteDisable(uint8_t idx)
     EE_MuxDisable();
 }
 
-/* ── Read ────────────────────────────────────────────────────── */
-uint16_t EE_Read(uint8_t idx, uint8_t addr)
+/* ── Read (x8: 8-bit data) ───────────────────────────────────── */
+uint8_t EE_Read(uint8_t idx, uint8_t addr)
 {
     EE_MuxSelect(idx);
     EE_MuxEnable();
@@ -255,15 +254,15 @@ uint16_t EE_Read(uint8_t idx, uint8_t addr)
     ee_delay();
 
     /* READ: opcode = 10 */
-    ee_send_command(0x02, addr & 0x7F);
+    ee_send_command(0x02, addr);
 
     /* Dummy bit (leading zero before data) */
     ee_recv_bit();
 
-    /* Read 16-bit data MSB first */
-    uint16_t data = 0;
-    for (int i = 15; i >= 0; i--)
-        data |= ((uint16_t)ee_recv_bit() << i);
+    /* Read 8-bit data MSB first */
+    uint8_t data = 0;
+    for (int i = 7; i >= 0; i--)
+        data |= (ee_recv_bit() << i);
 
     EE_CS_Low(idx);
     ee_delay();
@@ -272,8 +271,8 @@ uint16_t EE_Read(uint8_t idx, uint8_t addr)
     return data;
 }
 
-/* ── Write ───────────────────────────────────────────────────── */
-bool EE_Write(uint8_t idx, uint8_t addr, uint16_t data)
+/* ── Write (x8: 8-bit data) ──────────────────────────────────── */
+bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data)
 {
     EE_MuxSelect(idx);
     EE_MuxEnable();
@@ -284,10 +283,10 @@ bool EE_Write(uint8_t idx, uint8_t addr, uint16_t data)
     ee_delay();
 
     /* WRITE: opcode = 01 */
-    ee_send_command(0x01, addr & 0x7F);
+    ee_send_command(0x01, addr);
 
-    /* Send 16-bit data MSB first */
-    for (int i = 15; i >= 0; i--)
+    /* Send 8-bit data MSB first */
+    for (int i = 7; i >= 0; i--)
         ee_send_bit((data >> i) & 1);
 
     /* Wait for write completion */
@@ -315,120 +314,112 @@ bool EE_DetectReadOnly(uint8_t idx)
      *  2) 둘 다 0x0000 이면 → 같은 주소를 2회 읽어 일관성 확인
      *     (칩 없으면 CLK 노이즈로 간헐적 비트 발생 가능) */
 
-    uint16_t val0 = EE_Read(idx, 0);
-    uint16_t val64 = EE_Read(idx, 64);
+    uint8_t val0 = EE_Read(idx, 0);
+    uint8_t val64 = EE_Read(idx, 64);
 
     /* 하나라도 비-제로이면 칩 존재 확정 */
-    if (val0 != 0x0000 || val64 != 0x0000)
+    if (val0 != 0x00 || val64 != 0x00)
         return true;
 
-    /* 둘 다 0x0000 → 재확인 (칩이 실제로 0x0000 인지, 풀다운인지) */
-    uint16_t val0b = EE_Read(idx, 0);
-    uint16_t val64b = EE_Read(idx, 64);
+    /* 둘 다 0x00 → 재확인 */
+    uint8_t val0b = EE_Read(idx, 0);
+    uint8_t val64b = EE_Read(idx, 64);
 
-    /* 일관성 확인: 칩은 항상 같은 값, 풀다운도 항상 0 → 구분 어려움.
-     * 추가 방법: 주소 127을 읽어서 3개 주소가 모두 0이면 "미확정".
-     * 이 경우 false 반환 → mainAppTask 의 EE_Detect(쓰기)로 최종 확인. */
-    if (val0b == 0x0000 && val64b == 0x0000)
-        return false;  /* 칩 없거나 전부 0x0000 (프로그래밍 완료 상태) */
+    if (val0b == 0x00 && val64b == 0x00)
+        return false;  /* 칩 없거나 전부 0x00 (프로그래밍 완료 상태) */
 
     return true;
 }
 
-/* ── Detect (쓰기 포함, 확정 감지) ───────────────────────────── */
+/* ── Detect (쓰기 포함, 확정 감지, x8) ──────────────────────── */
 bool EE_Detect(uint8_t idx)
 {
     if (idx >= EE_NUM_CHIPS)
         return false;
 
-    /* Try to read address 0.
-     * If no chip present, DOUT is pulled low by R45/R46 → all zeros.
-     * A valid chip would respond with the start bit protocol.
-     *
-     * We also try a second read from a different address.
-     * If both reads return the same value AND the dummy bit was 0
-     * (proper protocol), the chip is present. */
+    /* Write enable → write 0xA5 to addr 255 → read back → verify */
+    EE_WriteEnable(idx);
 
-    EE_MuxSelect(idx);
-    EE_MuxEnable();
-    clk_low();
-    din_low();
-
-    EE_CS_High(idx);
-    ee_delay();
-
-    /* Send READ command for addr 0 */
-    ee_send_command(0x02, 0);
-
-    /* Check dummy bit: should be 0 if chip is responding */
-    uint8_t dummy = ee_recv_bit();
-
-    /* Read 16 bits */
-    uint16_t val = 0;
-    for (int i = 15; i >= 0; i--)
-        val |= ((uint16_t)ee_recv_bit() << i);
-
-    EE_CS_Low(idx);
-    ee_delay();
-
-    /* If no chip: CLK pulses on floating line → dummy might be random.
-     * With pull-down on DOUT, no-chip gives dummy=0, val=0x0000.
-     * A real chip also gives dummy=0 but could have val=0x0000.
-     *
-     * Better detection: write a test pattern, read back.
-     * But we want non-destructive detection first. */
-
-    /* Heuristic: try writing EWEN then reading.
-     * If chip is present, EWEN succeeds silently.
-     * Then write 0x1234 to addr 127 (unlikely data), read back. */
-
-    /* Write enable */
-    EE_CS_High(idx);
-    ee_delay();
-    ee_send_bit(1); ee_send_bit(0); ee_send_bit(0);  /* SB + 00 */
-    ee_send_bit(1); ee_send_bit(1);                    /* 11xxxxx */
-    for (int i = 0; i < 5; i++) ee_send_bit(0);
-    EE_CS_Low(idx);
-    ee_delay();
-
-    /* Write 0xA5A5 to addr 127 */
-    EE_CS_High(idx);
-    ee_delay();
-    ee_send_command(0x01, 127);
-    uint16_t test_val = 0xA5A5;
-    for (int i = 15; i >= 0; i--)
-        ee_send_bit((test_val >> i) & 1);
-    bool write_ok = ee_wait_ready(idx, 20);
-    EE_CS_Low(idx);
-    ee_delay();
-
-    if (!write_ok) {
-        EE_MuxDisable();
+    uint8_t test_val = 0xA5;
+    if (!EE_Write(idx, 255, test_val)) {
+        EE_WriteDisable(idx);
         return false;
     }
 
-    /* Read back addr 127 */
-    EE_CS_High(idx);
-    ee_delay();
-    ee_send_command(0x02, 127);
-    ee_recv_bit();  /* dummy */
-    uint16_t readback = 0;
-    for (int i = 15; i >= 0; i--)
-        readback |= ((uint16_t)ee_recv_bit() << i);
-    EE_CS_Low(idx);
-    ee_delay();
+    uint8_t readback = EE_Read(idx, 255);
 
-    /* Write disable */
-    EE_CS_High(idx);
-    ee_delay();
-    ee_send_bit(1); ee_send_bit(0); ee_send_bit(0);
-    for (int i = 0; i < 7; i++) ee_send_bit(0);
-    EE_CS_Low(idx);
-    ee_delay();
-
-    EE_MuxDisable();
+    EE_WriteDisable(idx);
 
     return (readback == test_val);
+}
+
+/* ── 칩 종류 식별 (93C46 vs 93C56) ───────────────────────────── */
+EE_ChipType EE_IdentifyChip(void)
+{
+    /* 첫 번째 감지된 칩(idx=0 부터)으로 판별.
+     * 방법: 93C56 모드(8-bit addr)로 주소 200에 쓰기/읽기 시도.
+     *       93C46은 주소 127까지만 → 주소 200은 존재하지 않아 실패.
+     *       93C56이면 성공. */
+
+    /* 먼저 감지된 칩 찾기 */
+    uint8_t test_idx = 255;
+    for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
+        /* 간단 읽기로 칩 존재 확인 */
+        uint8_t val = EE_Read(i, 0);
+        /* 아무 칩이든 시도 */
+        test_idx = i;
+        break;
+    }
+    if (test_idx == 255) {
+        g_chip_type = EE_CHIP_UNKNOWN;
+        return EE_CHIP_UNKNOWN;
+    }
+
+    /* ── 93C56 모드로 시도 (8-bit addr) ────────────── */
+    g_addr_bits = 8;
+    g_num_addrs = 256;
+
+    EE_WriteEnable(test_idx);
+
+    /* 주소 200에 0xA5 쓰기 (93C46 범위 밖) */
+    bool w_ok = EE_Write(test_idx, 200, 0xA5);
+    uint8_t rb = 0;
+    if (w_ok)
+        rb = EE_Read(test_idx, 200);
+
+    /* 원래 값 복원 (나중에 프로그래밍에서 0으로 됨) */
+    EE_WriteDisable(test_idx);
+
+    if (w_ok && rb == 0xA5) {
+        /* 93C56 확정 */
+        g_chip_type = EE_CHIP_93C56;
+        g_addr_bits = 8;
+        g_num_addrs = 256;
+        return EE_CHIP_93C56;
+    }
+
+    /* ── 93C46 모드로 전환 (7-bit addr) ────────────── */
+    g_addr_bits = 7;
+    g_num_addrs = 128;
+
+    /* 주소 100에 0x5A 쓰기/읽기 (93C46 범위 내) */
+    EE_WriteEnable(test_idx);
+    w_ok = EE_Write(test_idx, 100, 0x5A);
+    rb = 0;
+    if (w_ok)
+        rb = EE_Read(test_idx, 100);
+    EE_WriteDisable(test_idx);
+
+    if (w_ok && rb == 0x5A) {
+        g_chip_type = EE_CHIP_93C46;
+        return EE_CHIP_93C46;
+    }
+
+    /* 둘 다 실패 */
+    g_chip_type = EE_CHIP_UNKNOWN;
+    g_addr_bits = 8;
+    g_num_addrs = 256;
+    return EE_CHIP_UNKNOWN;
 }
 
 /* ── Memory Test ─────────────────────────────────────────────── */
@@ -439,23 +430,23 @@ bool EE_TestMemory(uint8_t idx)
 
     EE_WriteEnable(idx);
 
-    /* Pass 1: write 0xAAAA to all addresses, verify */
-    for (uint8_t a = 0; a < EE_NUM_ADDRS; a++) {
-        if (!EE_Write(idx, a, 0xAAAA))
+    /* Pass 1: write 0xAA to all 256 addresses, verify */
+    for (uint16_t a = 0; a < g_num_addrs; a++) {
+        if (!EE_Write(idx, (uint8_t)a, 0xAA))
             goto fail;
     }
-    for (uint8_t a = 0; a < EE_NUM_ADDRS; a++) {
-        if (EE_Read(idx, a) != 0xAAAA)
+    for (uint16_t a = 0; a < g_num_addrs; a++) {
+        if (EE_Read(idx, (uint8_t)a) != 0xAA)
             goto fail;
     }
 
-    /* Pass 2: write 0x5555 to all addresses, verify */
-    for (uint8_t a = 0; a < EE_NUM_ADDRS; a++) {
-        if (!EE_Write(idx, a, 0x5555))
+    /* Pass 2: write 0x55 to all 256 addresses, verify */
+    for (uint16_t a = 0; a < g_num_addrs; a++) {
+        if (!EE_Write(idx, (uint8_t)a, 0x55))
             goto fail;
     }
-    for (uint8_t a = 0; a < EE_NUM_ADDRS; a++) {
-        if (EE_Read(idx, a) != 0x5555)
+    for (uint16_t a = 0; a < g_num_addrs; a++) {
+        if (EE_Read(idx, (uint8_t)a) != 0x55)
             goto fail;
     }
 
@@ -475,15 +466,15 @@ bool EE_ProgramZero(uint8_t idx)
 
     EE_WriteEnable(idx);
 
-    /* Write 0x0000 to all addresses */
-    for (uint8_t a = 0; a < EE_NUM_ADDRS; a++) {
-        if (!EE_Write(idx, a, 0x0000))
+    /* Write 0x00 to all 256 addresses */
+    for (uint16_t a = 0; a < g_num_addrs; a++) {
+        if (!EE_Write(idx, (uint8_t)a, 0x00))
             goto fail;
     }
 
     /* Verify */
-    for (uint8_t a = 0; a < EE_NUM_ADDRS; a++) {
-        if (EE_Read(idx, a) != 0x0000)
+    for (uint16_t a = 0; a < g_num_addrs; a++) {
+        if (EE_Read(idx, (uint8_t)a) != 0x00)
             goto fail;
     }
 
