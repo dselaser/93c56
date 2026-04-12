@@ -81,6 +81,11 @@ bool EE_Write(uint8_t idx, uint8_t addr, uint16_t data);
  *  Tries a read and checks for valid response. */
 bool EE_Detect(uint8_t idx);
 
+/** 읽기 전용 감지 (쓰기 없음, 포그핀 불안정 시 안전).
+ *  주소 0과 64를 읽어서 응답 유무로 판단.
+ *  detectTask 용 — 포그핀 접촉 불안정 상태에서도 안전. */
+bool EE_DetectReadOnly(uint8_t idx);
+
 /** Test all memory cells of chip idx by writing/reading 0xAAAA and 0x5555.
  *  Returns true if all cells pass. */
 bool EE_TestMemory(uint8_t idx);

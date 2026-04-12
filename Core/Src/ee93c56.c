@@ -300,7 +300,42 @@ bool EE_Write(uint8_t idx, uint8_t addr, uint16_t data)
     return ok;
 }
 
-/* ── Detect ──────────────────────────────────────────────────── */
+/* ── 읽기 전용 감지 (detectTask 용, 쓰기 없음) ───────────── */
+bool EE_DetectReadOnly(uint8_t idx)
+{
+    if (idx >= EE_NUM_CHIPS)
+        return false;
+
+    /* 주소 0 과 64 를 읽어서 비교.
+     * 칩 없음(풀다운) → 둘 다 0x0000 (DOUT 항상 LOW)
+     * 칩 있음 → 데이터가 있거나, 비어있어도 두 번째 읽기가 일관됨.
+     *
+     * 판정 기준:
+     *  1) 두 주소 중 하나라도 0x0000 이 아니면 → 칩 있음
+     *  2) 둘 다 0x0000 이면 → 같은 주소를 2회 읽어 일관성 확인
+     *     (칩 없으면 CLK 노이즈로 간헐적 비트 발생 가능) */
+
+    uint16_t val0 = EE_Read(idx, 0);
+    uint16_t val64 = EE_Read(idx, 64);
+
+    /* 하나라도 비-제로이면 칩 존재 확정 */
+    if (val0 != 0x0000 || val64 != 0x0000)
+        return true;
+
+    /* 둘 다 0x0000 → 재확인 (칩이 실제로 0x0000 인지, 풀다운인지) */
+    uint16_t val0b = EE_Read(idx, 0);
+    uint16_t val64b = EE_Read(idx, 64);
+
+    /* 일관성 확인: 칩은 항상 같은 값, 풀다운도 항상 0 → 구분 어려움.
+     * 추가 방법: 주소 127을 읽어서 3개 주소가 모두 0이면 "미확정".
+     * 이 경우 false 반환 → mainAppTask 의 EE_Detect(쓰기)로 최종 확인. */
+    if (val0b == 0x0000 && val64b == 0x0000)
+        return false;  /* 칩 없거나 전부 0x0000 (프로그래밍 완료 상태) */
+
+    return true;
+}
+
+/* ── Detect (쓰기 포함, 확정 감지) ───────────────────────────── */
 bool EE_Detect(uint8_t idx)
 {
     if (idx >= EE_NUM_CHIPS)

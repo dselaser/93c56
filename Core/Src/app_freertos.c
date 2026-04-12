@@ -237,15 +237,38 @@ void StartMainAppTask(void *argument)
          * 상태 A: LED 순차 점등 → 외곽 회전 쇼 → 음성 반복
          * ════════════════════════════════════════════════════════ */
 
-        /* 외곽 LED 시계방향 (위치 인덱스 = led_order 경유)
-         *  U19=pos0, U20=pos1, U21=pos2, U22=pos3  (상단 L→R)
-         *  U26=pos7                                 (우측)
-         *  U30=pos11, U29=pos10, U28=pos9, U27=pos8 (하단 R→L)
-         *  U23=pos4                                 (좌측)
-         */
-        static const uint8_t rim[] = {0,1,2,3, 4, 11,10,9,8, 7};
+        /* ── 색상 팔레트 (등휘도 보정) ────────────────────── */
+        static const struct { uint8_t r, g, b, br; } palette[] = {
+            {255,   0,   0,  4},  /* 적 */
+            {  0,   0, 255, 12},  /* 청 */
+            {  0,  76,   0,  4},  /* 녹 */
+            {200,  20,   0,  4},  /* 주황 */
+            {  0,  50, 255,  4},  /* 청록 */
+            {180,   0, 200,  4},  /* 자홍 */
+            {255, 255,   0,  1},  /* 황 */
+            {255, 255, 255,  2},  /* 백 */
+        };
+        #define PAL_N (sizeof(palette)/sizeof(palette[0]))
 
-        /* (1) 순차 점등: 전체 LED 백색 ON (200ms 간격) */
+        /* ── 패턴 순서 테이블 ─────────────────────────── */
+        /* 패턴 B: 세로 지그재그 */
+        static const uint8_t patB[] = {0,7,8, 9,6,1, 2,5,10, 11,4,3};
+        /* 패턴 D: 소용돌이 (외곽→중심) */
+        static const uint8_t patD[] = {0,1,2,3, 4,11,10,9,8, 7, 6,5};
+        /* 패턴 E: 확산 (중심→외곽) */
+        static const uint8_t patE[] = {5,6, 1,7,9,2, 0,4,8,10,3,11};
+
+        /* ── LED 쇼 헬퍼: 색상 1개 LED on-off ─────────── */
+        #define SHOW_BLINK(pos, cr, cg, cb, cbr, on_ms, off_ms) do { \
+            uint8_t _ci = led_order[pos]; \
+            g_leds[_ci].brightness = cbr; \
+            g_leds[_ci].r = cr; g_leds[_ci].g = cg; g_leds[_ci].b = cb; \
+            led_update(); osDelay(on_ms); \
+            led_set(pos, 0, 0, 0); \
+            led_update(); osDelay(off_ms); \
+        } while(0)
+
+        /* (1) 순차 점등: U19→U30 백색 ON (200ms 간격) */
         led_all_off();
         for (uint8_t i = 0; i < SK9822_NUM_LEDS; i++) {
             led_set(i, 255, 255, 255);
@@ -253,84 +276,174 @@ void StartMainAppTask(void *argument)
             osDelay(200);
         }
 
-        /* (2) 외곽 회전 쇼 (detectTask가 보드 감지)
-         *  5회전 순방향(색1) → 음성 → 5회전 역방향(색2) → 음성 → ... */
-
-        /* 회전 색상 팔레트 (등휘도 보정)
-         *
-         * 인간 눈 감응도 (ITU-R BT.709):
-         *   R × 0.2126 + G × 0.7152 + B × 0.0722 = 체감 밝기
-         *   → 녹색이 가장 밝고, 청색이 가장 어둡게 느껴짐
-         *
-         * SK9822 brightness (0-31)로 보정:
-         *   모든 색의 체감 밝기 ≈ 108 으로 통일
-         */
-        static const struct { uint8_t r, g, b, br; } show_colors[] = {
-            {255,   0,   0,  4},  /* 적색   */
-            {  0,   0, 255, 12},  /* 청색   */
-            {  0,  76,   0,  4},  /* 녹색   */
-            {200,  20,   0,  4},  /* 주황   */
-            {  0,  50, 255,  4},  /* 청록   */
-            {180,   0, 200,  4},  /* 자홍   */
-        };
-        #define NUM_SHOW_COLORS (sizeof(show_colors)/sizeof(show_colors[0]))
-
+        /* (2) 패턴 A~H 순환 쇼, H 끝나면 음성 출력 */
         g_board_present = false;
         g_detect_enable = true;
         {
-            uint8_t color_idx = 0;
-            bool forward = true;    /* true=순방향, false=역방향 */
-            uint8_t show_count = 0;
+            uint8_t pal_idx = 0;
 
             while (!g_board_present)
             {
-                uint8_t cr = show_colors[color_idx].r;
-                uint8_t cg = show_colors[color_idx].g;
-                uint8_t cb = show_colors[color_idx].b;
-                uint8_t cbr = show_colors[color_idx].br;
+/* ──────── 패턴 A: 번호순 왕복 (빠르게) ──────── */
+#define PAT_COLOR palette[pal_idx % PAL_N]
+            {
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                for (uint8_t i = 0; i < 12 && !g_board_present; i++)
+                    SHOW_BLINK(i, cr, cg, cb, cbr, 120, 30);
+                for (int8_t i = 11; i >= 0 && !g_board_present; i--)
+                    SHOW_BLINK((uint8_t)i, cr, cg, cb, cbr, 120, 30);
+            }
+            pal_idx++;
+            if (g_board_present) break;
 
-                /* ── 1회전 ──────────────────────────────── */
-                for (uint8_t s = 0; s < 10; s++)
-                {
-                    uint8_t cur, prev;
-                    if (forward) {
-                        cur  = rim[s];
-                        prev = rim[(s == 0) ? 9 : s - 1];
-                    } else {
-                        cur  = rim[9 - s];
-                        prev = rim[(9 - s == 9) ? 0 : 10 - s];
-                    }
+/* ──────── 패턴 B: 세로 지그재그 왕복 (보통) ──────── */
+            {
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                for (uint8_t s = 0; s < 12 && !g_board_present; s++)
+                    SHOW_BLINK(patB[s], cr, cg, cb, cbr, 130, 30);
+                for (int8_t s = 11; s >= 0 && !g_board_present; s--)
+                    SHOW_BLINK(patB[s], cr, cg, cb, cbr, 130, 30);
+            }
+            pal_idx++;
+            if (g_board_present) break;
 
-                    led_set(prev, 255, 255, 255);  /* 이전 → 백색 (br=2) */
-                    {   /* 현재 → 색상 (보정 brightness 적용) */
-                        uint8_t ci = led_order[cur];
+/* ──────── 패턴 C: 대각선 쓸기 ──────── */
+            /* 대각선 그룹: {0},{1,7},{2,6,8},{3,5,9},{4,10},{11} */
+            {
+                static const uint8_t diag[][4] = {
+                    {0,  255,255,255}, {1,7,  255,255}, {2,6,8, 255},
+                    {3,5,9, 255},     {4,10, 255,255}, {11, 255,255,255}
+                };
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                /* 순방향 */
+                for (uint8_t d = 0; d < 6 && !g_board_present; d++) {
+                    for (uint8_t k = 0; k < 4 && diag[d][k] != 255; k++) {
+                        uint8_t ci = led_order[diag[d][k]];
                         g_leds[ci].brightness = cbr;
-                        g_leds[ci].r = cr;
-                        g_leds[ci].g = cg;
-                        g_leds[ci].b = cb;
+                        g_leds[ci].r = cr; g_leds[ci].g = cg; g_leds[ci].b = cb;
                     }
-                    led_update();
-                    osDelay(200);
-
-                    if (g_board_present) break;
+                    led_update(); osDelay(200);
+                    for (uint8_t k = 0; k < 4 && diag[d][k] != 255; k++)
+                        led_set(diag[d][k], 0, 0, 0);
+                    led_update(); osDelay(50);
                 }
-                /* 마지막 색상 복원 */
-                if (forward)
-                    led_set(rim[9], 255, 255, 255);
-                else
-                    led_set(rim[0], 255, 255, 255);
-                led_update();
-
-                /* ── 매 회전마다 색상 변경, 방향 교대 ── */
-                forward = !forward;
-                color_idx = (color_idx + 1) % NUM_SHOW_COLORS;
-
-                /* ── 5회전마다 음성 출력 ─────────────── */
-                if (!g_board_present && ++show_count >= 5) {
-                    voice_play(VOICE_PLACE_BOARD);
-                    show_count = 0;
+                /* 역방향 */
+                for (int8_t d = 5; d >= 0 && !g_board_present; d--) {
+                    for (uint8_t k = 0; k < 4 && diag[d][k] != 255; k++) {
+                        uint8_t ci = led_order[diag[d][k]];
+                        g_leds[ci].brightness = cbr;
+                        g_leds[ci].r = cr; g_leds[ci].g = cg; g_leds[ci].b = cb;
+                    }
+                    led_update(); osDelay(200);
+                    for (uint8_t k = 0; k < 4 && diag[d][k] != 255; k++)
+                        led_set(diag[d][k], 0, 0, 0);
+                    led_update(); osDelay(50);
                 }
             }
+            pal_idx++;
+            if (g_board_present) break;
+
+/* ──────── 패턴 D: 소용돌이 (외곽→중심) ──────── */
+            {
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                for (uint8_t s = 0; s < 12 && !g_board_present; s++)
+                    SHOW_BLINK(patD[s], cr, cg, cb, cbr, 150, 30);
+                for (int8_t s = 11; s >= 0 && !g_board_present; s--)
+                    SHOW_BLINK(patD[s], cr, cg, cb, cbr, 150, 30);
+            }
+            pal_idx++;
+            if (g_board_present) break;
+
+/* ──────── 패턴 E: 확산/수축 (중심→외곽→중심) ──────── */
+            {
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                for (uint8_t s = 0; s < 12 && !g_board_present; s++)
+                    SHOW_BLINK(patE[s], cr, cg, cb, cbr, 140, 40);
+                for (int8_t s = 11; s >= 0 && !g_board_present; s--)
+                    SHOW_BLINK(patE[s], cr, cg, cb, cbr, 140, 40);
+            }
+            pal_idx++;
+            if (g_board_present) break;
+
+/* ──────── 패턴 F: 랜덤 반짝 ──────── */
+            {
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                uint32_t seed = HAL_GetTick();
+                for (uint8_t n = 0; n < 24 && !g_board_present; n++) {
+                    seed = seed * 1103515245U + 12345U;
+                    uint8_t pos = (seed >> 16) % 12;
+                    SHOW_BLINK(pos, cr, cg, cb, cbr, 60, 40);
+                }
+            }
+            pal_idx++;
+            if (g_board_present) break;
+
+/* ──────── 패턴 G: 행/열 스캔 ──────── */
+            {
+                /* 행 단위: row0={0,1,2,3}, row1={7,6,5,4}, row2={8,9,10,11} */
+                static const uint8_t rows[3][4] = {
+                    {0,1,2,3}, {7,6,5,4}, {8,9,10,11}
+                };
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                /* 행 스캔 순방향 */
+                for (uint8_t r = 0; r < 3 && !g_board_present; r++) {
+                    for (uint8_t c = 0; c < 4; c++) {
+                        uint8_t ci = led_order[rows[r][c]];
+                        g_leds[ci].brightness = cbr;
+                        g_leds[ci].r = cr; g_leds[ci].g = cg; g_leds[ci].b = cb;
+                    }
+                    led_update(); osDelay(250);
+                    for (uint8_t c = 0; c < 4; c++)
+                        led_set(rows[r][c], 0, 0, 0);
+                    led_update(); osDelay(80);
+                }
+                /* 열 스캔: col0={0,7,8}, col1={1,6,9}, col2={2,5,10}, col3={3,4,11} */
+                static const uint8_t cols[4][3] = {
+                    {0,7,8}, {1,6,9}, {2,5,10}, {3,4,11}
+                };
+                for (uint8_t c = 0; c < 4 && !g_board_present; c++) {
+                    for (uint8_t r = 0; r < 3; r++) {
+                        uint8_t ci = led_order[cols[c][r]];
+                        g_leds[ci].brightness = cbr;
+                        g_leds[ci].r = cr; g_leds[ci].g = cg; g_leds[ci].b = cb;
+                    }
+                    led_update(); osDelay(250);
+                    for (uint8_t r = 0; r < 3; r++)
+                        led_set(cols[c][r], 0, 0, 0);
+                    led_update(); osDelay(80);
+                }
+            }
+            pal_idx++;
+            if (g_board_present) break;
+
+/* ──────── 패턴 H: 체커보드 교대 깜빡 ──────── */
+            {
+                /* 그룹1: 체스 흰칸 {0,2,5,7,9,11}, 그룹2: 흑칸 {1,3,4,6,8,10} */
+                static const uint8_t grp1[] = {0,2,5,7,9,11};
+                static const uint8_t grp2[] = {1,3,4,6,8,10};
+                uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
+                for (uint8_t n = 0; n < 8 && !g_board_present; n++) {
+                    const uint8_t *on  = (n & 1) ? grp2 : grp1;
+                    const uint8_t *off = (n & 1) ? grp1 : grp2;
+                    for (uint8_t k = 0; k < 6; k++) {
+                        uint8_t ci = led_order[on[k]];
+                        g_leds[ci].brightness = cbr;
+                        g_leds[ci].r = cr; g_leds[ci].g = cg; g_leds[ci].b = cb;
+                    }
+                    for (uint8_t k = 0; k < 6; k++)
+                        led_set(off[k], 0, 0, 0);
+                    led_update();
+                    osDelay(300);
+                }
+                led_all_off();
+            }
+            pal_idx++;
+            if (g_board_present) break;
+
+/* ──────── A~H 전체 완료 → 음성 출력 ──────── */
+                voice_play(VOICE_PLACE_BOARD);
+
+            } /* while (!g_board_present) */
         }
         g_detect_enable = false;  /* 감지 태스크 일시 중지 */
 
@@ -444,9 +557,14 @@ void StartMainAppTask(void *argument)
  */
 void StartDetectTask(void *argument)
 {
+    uint8_t prev_count = 0;
+    uint8_t stable = 0;          /* 연속 동일 결과 횟수 */
+
     for (;;)
     {
         if (!g_detect_enable) {
+            prev_count = 0;
+            stable = 0;
             osDelay(100);
             continue;
         }
@@ -454,14 +572,21 @@ void StartDetectTask(void *argument)
         uint8_t count = 0;
         bool det[EE_NUM_CHIPS];
 
+        /* ── 읽기 전용 감지 (쓰기 없음 → 포그핀 불안정 시 안전) ── */
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
-            det[i] = EE_Detect(i);
+            det[i] = EE_DetectReadOnly(i);
             if (det[i]) count++;
         }
 
-        /* 결과 기록 (안정 확인: 2회 연속 동일 결과) */
-        static uint8_t prev_count = 0;
+        /* 안정 확인: 3회 연속 동일 결과여야 반영 */
         if (count == prev_count) {
+            if (stable < 255) stable++;
+        } else {
+            stable = 0;
+        }
+        prev_count = count;
+
+        if (stable >= 3) {
             g_detect_count = count;
             for (uint8_t i = 0; i < EE_NUM_CHIPS; i++)
                 g_detected[i] = det[i];
@@ -471,7 +596,6 @@ void StartDetectTask(void *argument)
             else
                 g_board_present = false;
         }
-        prev_count = count;
 
         osDelay(200);
     }
