@@ -27,6 +27,8 @@
 #include "voice_data.h"
 #include "ee93c56.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,8 +48,9 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-extern SPI_HandleTypeDef hspi1;
-extern I2S_HandleTypeDef hi2s3;
+extern SPI_HandleTypeDef  hspi1;
+extern I2S_HandleTypeDef  hi2s3;
+extern UART_HandleTypeDef huart1;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -139,6 +142,18 @@ void StartDefaultTask(void *argument)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
+/* ── UART 로그 헬퍼 ──────────────────────────────────────────── */
+static void uart_log(const char *fmt, ...)
+{
+    char buf[160];
+    va_list args;
+    va_start(args, fmt);
+    int len = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (len > 0)
+        HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, HAL_MAX_DELAY);
+}
+
 /* ── LED 유틸리티 ────────────────────────────────────────────── */
 
 /* led_order[i]: 메모리 위치 i → SK9822 체인 인덱스
@@ -161,7 +176,13 @@ static void led_all_off(void)
 static void led_set(uint8_t idx, uint8_t r, uint8_t g, uint8_t b)
 {
     uint8_t chain = led_order[idx];
-    g_leds[chain].brightness = 0;   /* 백색 밝기 최저 */
+    /* SK9822: brightness=0 → 완전 꺼짐. 색상에 따라 적절한 밝기 설정.
+     * 청색(b채널)은 시감 보정으로 br=12, 소등=0, 나머지=4 */
+    uint8_t br;
+    if (r == 0 && g == 0 && b == 0) br = 0;   /* 소등 */
+    else if (r == 0 && g == 0)      br = 12;   /* 청색 */
+    else                             br = 4;    /* 적, 백, 기타 */
+    g_leds[chain].brightness = br;
     g_leds[chain].r = r;
     g_leds[chain].g = g;
     g_leds[chain].b = b;
@@ -232,6 +253,8 @@ void StartMainAppTask(void *argument)
     bool any_defective;
 
     /* ── 전원 ON 인트로 (최초 1회) ──────────────── */
+    uart_log("\r\n=== 93C56 Programmer (DSE INC) ===\r\n");
+    uart_log("[INIT] System ready. Slots: %d\r\n", EE_NUM_CHIPS);
     voice_play(VOICE_INTRO);
     osDelay(300);
     voice_play(VOICE_PLACE_BOARD);
@@ -283,6 +306,7 @@ void StartMainAppTask(void *argument)
         }
 
         /* (2) 패턴 A~H 순환 쇼, H 끝나면 음성 출력 */
+        uart_log("[WAIT] Waiting for memory board...\r\n");
         g_board_present = false;
         g_detect_enable = true;
         {
@@ -457,13 +481,29 @@ void StartMainAppTask(void *argument)
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++)
             detected[i] = g_detected[i];
 
+        /* ── 보드 감지 결과 UART 출력 ─────────────── */
+        uart_log("[BOARD] Board detected! (%u/%u chips)\r\n",
+                 g_detect_count, EE_NUM_CHIPS);
+        uart_log("[SCAN] ");
+        for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
+            uart_log("CS%02u:%-5s", i, detected[i] ? "OK" : "NG");
+            if ((i % 4) == 3)
+                uart_log("\r\n[SCAN] ");
+        }
+        uart_log("\r\n");
+
         /* ── 칩 종류 식별 (93C46 vs 93C56) ─────────── */
         {
             EE_ChipType chip = EE_IdentifyChip();
-            if (chip == EE_CHIP_93C56)
+            if (chip == EE_CHIP_93C56) {
+                uart_log("[CHIP] Type: 93C56  (8-bit addr, 256 bytes)\r\n");
                 voice_play(VOICE_IS_93C56);
-            else if (chip == EE_CHIP_93C46)
+            } else if (chip == EE_CHIP_93C46) {
+                uart_log("[CHIP] Type: 93C46  (7-bit addr, 128 bytes)\r\n");
                 voice_play(VOICE_IS_93C46);
+            } else {
+                uart_log("[CHIP] Type: UNKNOWN\r\n");
+            }
             osDelay(500);
         }
 
@@ -472,6 +512,7 @@ void StartMainAppTask(void *argument)
          * ════════════════════════════════════════════════════════ */
         osDelay(200);
         /* 안정 확인을 위해 다시 한번 스캔 */
+        uart_log("[STATE B] Chip presence scan\r\n");
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
             detected[i] = EE_Detect(i);
             if (detected[i])
@@ -483,15 +524,18 @@ void StartMainAppTask(void *argument)
         osDelay(500);
 
         /* ════════════════════════════════════════════════════════
-         * 상태 C: 메모리 테스트 (0xAAAA/0x5555 write/read)
+         * 상태 C: 메모리 테스트 (0xAA/0x55 write/read)
          * ════════════════════════════════════════════════════════ */
+        uart_log("[STATE C] Memory test (0xAA / 0x55)\r\n");
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
             if (!detected[i]) {
                 test_ok[i] = false;
+                uart_log("[TEST] CS%02u: SKIP (not detected)\r\n", i);
                 continue;
             }
 
             test_ok[i] = EE_TestMemory(i);
+            uart_log("[TEST] CS%02u: %s\r\n", i, test_ok[i] ? "PASS" : "FAIL");
 
             if (test_ok[i])
                 led_set(i, 255, 255, 255);  /* 백색: 이상 없음 */
@@ -502,8 +546,9 @@ void StartMainAppTask(void *argument)
         osDelay(500);
 
         /* ════════════════════════════════════════════════════════
-         * 상태 D: 0x0000 프로그래밍 + 검증
+         * 상태 D: 0x00 프로그래밍 + 검증
          * ════════════════════════════════════════════════════════ */
+        uart_log("[STATE D] Programming (write 0x00 all)\r\n");
         any_defective = false;
 
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
@@ -511,10 +556,13 @@ void StartMainAppTask(void *argument)
                 prog_ok[i] = false;
                 led_set(i, 255, 0, 0);      /* 적색 유지 */
                 any_defective = true;
+                uart_log("[PROG] CS%02u: SKIP (%s)\r\n", i,
+                         !detected[i] ? "not detected" : "test failed");
                 continue;
             }
 
             prog_ok[i] = EE_ProgramZero(i);
+            uart_log("[PROG] CS%02u: %s\r\n", i, prog_ok[i] ? "OK" : "FAIL");
 
             if (prog_ok[i])
                 led_set(i, 0, 0, 255);      /* 청색: 프로그래밍 완료 */
@@ -530,6 +578,28 @@ void StartMainAppTask(void *argument)
          * 상태 E: 완료 → 결과 음성 + 보드 제거 대기
          * ════════════════════════════════════════════════════════ */
 
+        /* 최종 결과 UART 요약 */
+        {
+            uint8_t pass_cnt = 0, fail_cnt = 0, skip_cnt = 0;
+            for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
+                if (!detected[i])       skip_cnt++;
+                else if (prog_ok[i])    pass_cnt++;
+                else                    fail_cnt++;
+            }
+            uart_log("[DONE] Result: PASS=%u  FAIL=%u  SKIP=%u\r\n",
+                     pass_cnt, fail_cnt, skip_cnt);
+            if (fail_cnt > 0 || skip_cnt > 0) {
+                uart_log("[DONE] Defective/Missing: ");
+                for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
+                    if (!detected[i] || !prog_ok[i])
+                        uart_log("CS%02u ", i);
+                }
+                uart_log("\r\n");
+            } else {
+                uart_log("[DONE] All chips PASS.\r\n");
+            }
+        }
+
         /* 결과 음성 메시지 */
         voice_play(VOICE_COMPLETE);
 
@@ -539,6 +609,7 @@ void StartMainAppTask(void *argument)
         }
 
         /* "보드를 분리하여 주십시요" */
+        uart_log("[WAIT] Remove the board...\r\n");
         osDelay(500);
         voice_play(VOICE_REMOVE_BOARD);
 
@@ -558,6 +629,7 @@ void StartMainAppTask(void *argument)
         g_detect_enable = false;
 
         /* "보드가 분리되었습니다" */
+        uart_log("[BOARD] Board removed. Ready for next cycle.\r\n\r\n");
         voice_play(VOICE_BOARD_REMOVED);
         osDelay(300);
 
@@ -580,6 +652,77 @@ void StartDetectTask(void *argument)
     uint8_t prev_count = 0;
     uint8_t stable = 0;          /* 연속 동일 결과 횟수 */
 
+    /* ── 시작 진단 (한 번만 실행) ────────────────────────────────
+     * mainAppTask 가 UART 헤더를 출력하고 voice_play 에 진입한 후
+     * 실행되도록 500ms 대기. BelowNormal 우선순위이므로 Normal 태스크가
+     * 블락(I2S/osDelay) 중일 때만 CPU 를 얻어 진단 출력. */
+    osDelay(500);
+    uart_log("[DIAG] === Detection Diagnostic Start ===\r\n");
+
+    /* PB4 하드웨어 진단: ODR=0 설정 후 IDR 읽기
+     * IDR=1 → 외부에서 HIGH 강제됨 (PCB 단락/풀업)
+     * IDR=0 → GPIO 정상 동작 */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
+    osDelay(1);
+    uint8_t pb4_idr = (GPIOB->IDR & GPIO_PIN_4) ? 1 : 0;
+    uart_log("[DIAG] PB4(CS4) ODR=0 after, IDR=%u  %s\r\n",
+             pb4_idr,
+             pb4_idr ? "*** HW SHORT/PULLUP ***" : "GPIO OK");
+
+    /* 1. MUX 채널별 유휴 DOUT 확인
+     *    MUX 활성화(INH=L) 후 DOUT 가 L 이면 MUX 경로 정상 + 칩 미연결
+     *    DOUT 가 H 이면 해당 채널 칩이 DO=H 로 구동 중 (이상) */
+    uart_log("[DIAG] -- MUX idle DOUT scan --\r\n");
+    for (uint8_t ch = 0; ch < EE_NUM_CHIPS; ch++) {
+        EE_MuxSelect(ch);
+        EE_MuxEnable();
+        osDelay(1);
+        uint8_t dout_idle = HAL_GPIO_ReadPin(EE_DOUT_PORT, EE_DOUT_PIN) ? 1 : 0;
+        EE_MuxDisable();
+        uart_log("[DIAG] MUX ch%02u idle DOUT=%u\r\n", ch, dout_idle);
+    }
+
+    /* 2. 칩별 EWEN + Write(0xA5,addr255) + Read 단계별 진단
+     *    WR=TOUT → ee_wait_ready() 타임아웃 (DO 가 H 로 안 올라옴)
+     *    WR=OK, RB≠0xA5 → 쓰기는 됐지만 읽기 값 불일치
+     *    WR=OK, RB=0xA5 → DETECTED 정상 */
+    uart_log("[DIAG] -- Write/Read per chip --\r\n");
+    for (uint8_t di = 0; di < EE_NUM_CHIPS; di++) {
+        EE_WriteEnable(di);
+        bool    wr_ok = EE_Write(di, 255, 0xA5);
+        uint8_t rb    = 0xFF;
+        if (wr_ok)
+            rb = EE_Read(di, 255);
+        EE_WriteDisable(di);
+        uart_log("[DIAG] CS%02u: WR=%-4s  RB=0x%02X  %s\r\n",
+                 di,
+                 wr_ok ? "OK" : "TOUT",
+                 rb,
+                 (wr_ok && rb == 0xA5) ? "DETECTED" : "---");
+    }
+    uart_log("[DIAG] === Diagnostic End ===\r\n");
+
+    /* 3. 칩 종류 자동 식별 → g_addr_bits 자동 설정
+     *
+     * 진단에서 WR=OK 이지만 RB≠0xA5 인 경우,
+     * g_addr_bits=8 (93C56 x8) 가정이 잘못됐을 가능성이 높음.
+     *   93C46      (7-bit addr, 128B x8)
+     *   93C56 x16  (7-bit addr, 128W x16, ORG=H)
+     * 두 경우 모두 g_addr_bits=7 이 필요.
+     *
+     * EE_IdentifyChip() 은 8-bit 시도 후 실패 시 7-bit 로 재시도하여
+     * g_addr_bits / g_num_addrs 전역 변수를 올바르게 설정한다. */
+    uart_log("[DIAG] -- Auto chip identification --\r\n");
+    {
+        EE_ChipType ctype = EE_IdentifyChip();
+        const char *cname;
+        if      (ctype == EE_CHIP_93C56) cname = "93C56";
+        else if (ctype == EE_CHIP_93C46) cname = "93C46";
+        else                             cname = "UNKNOWN";
+        uart_log("[DIAG] ChipType=%-7s  addr_bits=%u  num_addrs=%u\r\n",
+                 cname, (unsigned)g_addr_bits, (unsigned)g_num_addrs);
+    }
+
     for (;;)
     {
         if (!g_detect_enable) {
@@ -592,9 +735,9 @@ void StartDetectTask(void *argument)
         uint8_t count = 0;
         bool det[EE_NUM_CHIPS];
 
-        /* ── 읽기 전용 감지 (쓰기 없음 → 포그핀 불안정 시 안전) ── */
+        /* ── 쓰기+읽기 감지 (EE_Detect: 0x00 프로그래밍 칩도 확실히 감지) ── */
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
-            det[i] = EE_DetectReadOnly(i);
+            det[i] = EE_Detect(i);
             if (det[i]) count++;
         }
 

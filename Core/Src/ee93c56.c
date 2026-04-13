@@ -299,34 +299,30 @@ bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data)
     return ok;
 }
 
-/* ── 읽기 전용 감지 (detectTask 용, 쓰기 없음) ───────────── */
+/* ── 읽기 전용 감지 (쓰기 없음) ─────────────────────────── */
 bool EE_DetectReadOnly(uint8_t idx)
 {
     if (idx >= EE_NUM_CHIPS)
         return false;
 
     /* 주소 0 과 64 를 읽어서 비교.
-     * 칩 없음(풀다운) → 둘 다 0x0000 (DOUT 항상 LOW)
-     * 칩 있음 → 데이터가 있거나, 비어있어도 두 번째 읽기가 일관됨.
-     *
-     * 판정 기준:
-     *  1) 두 주소 중 하나라도 0x0000 이 아니면 → 칩 있음
-     *  2) 둘 다 0x0000 이면 → 같은 주소를 2회 읽어 일관성 확인
-     *     (칩 없으면 CLK 노이즈로 간헐적 비트 발생 가능) */
+     * 칩 없음(풀다운) → DOUT 항상 LOW → 읽기 결과 0x00
+     * 칩 있음 → 비-제로 데이터면 확정; 둘 다 0x00이면 재확인.
+     * ※ 전체가 0x00으로 프로그래밍된 칩은 감지 불가(한계).
+     *   프로그래밍 완료 칩 감지에는 EE_Detect() 사용 권장. */
 
-    uint8_t val0 = EE_Read(idx, 0);
+    uint8_t val0  = EE_Read(idx, 0);
     uint8_t val64 = EE_Read(idx, 64);
 
-    /* 하나라도 비-제로이면 칩 존재 확정 */
     if (val0 != 0x00 || val64 != 0x00)
         return true;
 
     /* 둘 다 0x00 → 재확인 */
-    uint8_t val0b = EE_Read(idx, 0);
+    uint8_t val0b  = EE_Read(idx, 0);
     uint8_t val64b = EE_Read(idx, 64);
 
     if (val0b == 0x00 && val64b == 0x00)
-        return false;  /* 칩 없거나 전부 0x00 (프로그래밍 완료 상태) */
+        return false;  /* 칩 없거나 전부 0x00 */
 
     return true;
 }
