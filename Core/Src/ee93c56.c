@@ -170,8 +170,16 @@ void EE_GPIO_Init(void)
     HAL_GPIO_WritePin(MUX_INH_PORT, MUX_INH_PIN, GPIO_PIN_SET);
     HAL_GPIO_Init(MUX_INH_PORT, &gpio);
 
+    /* ── PA15(CS4) JTDI 해제: SWD 모드에서도 PA15 가 JTDI AF 로
+     *    남아있을 수 있음. 직접 레지스터로 GPIO OUTPUT 강제 설정. */
+    GPIOA->MODER   = (GPIOA->MODER   & ~(3UL << (15*2))) | (1UL << (15*2));
+    GPIOA->OTYPER  &= ~(1UL << 15);
+    GPIOA->OSPEEDR |= (3UL << (15*2));
+    GPIOA->PUPDR   &= ~(3UL << (15*2));
+    GPIOA->AFR[1]  &= ~(0xFUL << ((15-8)*4));   /* AF0 (GPIO) */
+    GPIOA->BSRR     = (1UL << 15) << 16;         /* PA15 = LOW */
+
     /* ── Outputs: CS0-CS11 (all LOW initially) ─────────── */
-    /* 주의: PB8 = SD_MODE (앰프), CS7은 PB7로 이동됨 */
     for (int i = 0; i < EE_NUM_CHIPS; i++) {
         gpio.Pin = ee_cs_table[i].pin;
         HAL_GPIO_WritePin(ee_cs_table[i].port, ee_cs_table[i].pin, GPIO_PIN_RESET);
