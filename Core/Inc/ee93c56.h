@@ -93,9 +93,17 @@ uint8_t EE_Read(uint8_t idx, uint8_t addr);
  *  Returns true if write completed successfully. */
 bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data);
 
+/** 전체 GPIO IDR 스캔: write 후 ready 상태에서 GPIOA~D IDR 읽기.
+ *  out[0]=GPIOA, out[1]=GPIOB, out[2]=GPIOC, out[3]=GPIOD */
+void EE_ScanAllGPIO(uint8_t idx, uint32_t out[4]);
+
 /** Detect if chip idx is present (pogo pin connected).
  *  Tries a read and checks for valid response. */
 bool EE_Detect(uint8_t idx);
+
+/** DO 핀 직접 스캔: chip idx에 write 후 12개 DO 핀 전부 읽기.
+ *  bit D = 1 → ee_do_table[D] 핀에서 HIGH 감지됨 */
+uint16_t EE_ScanDOPins(uint8_t idx);
 
 /** MUX 채널 매핑 스캔: chip idx에 write 후 ready 상태에서
  *  16채널 MUX 를 순회하여 DO=HIGH 가 읽히는 채널 비트마스크 반환.

@@ -21,37 +21,32 @@ const EE_CSPin ee_cs_table[EE_NUM_CHIPS] = {
     { GPIOA, GPIO_PIN_10 },   /* CS1  - PA10 */
     { GPIOA, GPIO_PIN_11 },   /* CS2  - PA11 */
     { GPIOA, GPIO_PIN_12 },   /* CS3  - PA12 */
-    { GPIOB, GPIO_PIN_4  },   /* CS4  - PB4  */
-    { GPIOB, GPIO_PIN_5  },   /* CS5  - PB5  */
-    { GPIOB, GPIO_PIN_6  },   /* CS6  - PB6  */
-    { GPIOB, GPIO_PIN_7  },   /* CS7  - PB7  */
-    { GPIOB, GPIO_PIN_9  },   /* CS8  - PB9  */
-    { GPIOC, GPIO_PIN_11 },   /* CS9  - PC11 */
-    { GPIOC, GPIO_PIN_12 },   /* CS10 - PC12 */
-    { GPIOD, GPIO_PIN_2  },   /* CS11 - PD2  */
+    { GPIOA, GPIO_PIN_15 },   /* CS4  - PA15 (회로도 확인) */
+    { GPIOB, GPIO_PIN_7  },   /* CS5  - PB7  (회로도 확인) */
+    { GPIOC, GPIO_PIN_11 },   /* CS6  - PC11 (회로도 확인) */
+    { GPIOC, GPIO_PIN_12 },   /* CS7  - PC12 (회로도 확인) */
+    { GPIOD, GPIO_PIN_2  },   /* CS8  - PD2  (회로도 확인) */
+    { GPIOB, GPIO_PIN_4  },   /* CS9  - PB4  (회로도 확인) */
+    { GPIOB, GPIO_PIN_5  },   /* CS10 - PB5  (회로도 확인) */
+    { GPIOB, GPIO_PIN_6  },   /* CS11 - PB6  (회로도 확인) */
 };
 
 /* ── DO Pin Table (MCU 직접 연결) ────────────────────────────── */
-/* MUX(CD4067) 를 경유하지 않고 MCU GPIO 에서 직접 DO 를 읽는다.
- * MUX 채널 매핑 불일치 및 미연결 문제를 근본적으로 해결. */
-/* 주의: 인덱스 = 칩 번호(CS_x), 값 = 해당 칩 DO 가 연결된 MCU 핀.
- * PCB 라우팅으로 CS_x 의 DO 가 DO_x 넷이 아닐 수 있음.
- * MUX 스캔 결과(CS04->ch9 등) 를 기반으로 매핑:
- *   CS_x DO -> MUX ch_y -> 넷 DO_y -> MCU 핀              */
+/* DO Pin Table: CS_x → DO_x (1:1 매핑, 회로도 확인)
+ * MCU GPIO 에서 직접 DO 를 읽는다 (MUX 미사용). */
 const EE_CSPin ee_do_table[EE_NUM_CHIPS] = {
-    /* [CS]   실제 DO넷 -> MCU 핀            (근거)           */
-    { GPIOC, GPIO_PIN_2  },   /* CS00 -> DO0  -> PC2   (ch0  OK) */
-    { GPIOC, GPIO_PIN_3  },   /* CS01 -> DO1  -> PC3   (ch1  OK) */
-    { GPIOA, GPIO_PIN_0  },   /* CS02 -> DO2  -> PA0   (ch2  OK) */
-    { GPIOA, GPIO_PIN_1  },   /* CS03 -> DO3  -> PA1   (ch3  OK) */
-    { GPIOC, GPIO_PIN_5  },   /* CS04 -> DO9  -> PC5   (ch9  확인) */
-    { GPIOB, GPIO_PIN_0  },   /* CS05 -> DO10 -> PB0   (ch10 확인) */
-    { GPIOB, GPIO_PIN_1  },   /* CS06 -> DO11 -> PB1   (ch11 확인) */
-    { GPIOA, GPIO_PIN_3  },   /* CS07 -> DO5  -> PA3   (ch5  확인) */
-    { GPIOC, GPIO_PIN_4  },   /* CS08 -> DO8  -> PC4   (추정: 교체 테스트) */
-    { GPIOB, GPIO_PIN_10 },   /* CS09 -> DO6  -> PB10  (ch6  확인) */
-    { GPIOA, GPIO_PIN_6  },   /* CS10 -> DO7  -> PA6   (ch7  확인) */
-    { GPIOA, GPIO_PIN_2  },   /* CS11 -> DO4  -> PA2   (추정: 교체 테스트) */
+    { GPIOC, GPIO_PIN_2  },   /* DO0  - PC2  */
+    { GPIOC, GPIO_PIN_3  },   /* DO1  - PC3  */
+    { GPIOA, GPIO_PIN_0  },   /* DO2  - PA0  */
+    { GPIOA, GPIO_PIN_1  },   /* DO3  - PA1  */
+    { GPIOA, GPIO_PIN_2  },   /* DO4  - PA2  */
+    { GPIOA, GPIO_PIN_3  },   /* DO5  - PA3  */
+    { GPIOB, GPIO_PIN_10 },   /* DO6  - PB10 */
+    { GPIOA, GPIO_PIN_6  },   /* DO7  - PA6  */
+    { GPIOC, GPIO_PIN_4  },   /* DO8  - PC4  */
+    { GPIOC, GPIO_PIN_5  },   /* DO9  - PC5  */
+    { GPIOB, GPIO_PIN_0  },   /* DO10 - PB0  */
+    { GPIOB, GPIO_PIN_1  },   /* DO11 - PB1  */
 };
 
 /* 현재 활성 칩의 DO 포트/핀 (dout_read 에서 사용) */
@@ -153,6 +148,11 @@ void EE_GPIO_Init(void)
     gpio.Pin = EE_DIN_PIN;
     HAL_GPIO_WritePin(EE_DIN_PORT, EE_DIN_PIN, GPIO_PIN_RESET);
     HAL_GPIO_Init(EE_DIN_PORT, &gpio);
+
+    /* ── SPI1 비활성화: PA7(DO11/CS11)이 SPI1_MOSI 와 공유됨.
+     * SPI1 주변장치가 활성 상태면 PA7 을 GPIO INPUT 으로 전환해도
+     * 내부 드라이버가 간섭할 수 있으므로 SPI1 클럭을 비활성화. */
+    __HAL_RCC_SPI1_CLK_DISABLE();
 
     /* ── Inputs: DO0~DO11 (MCU 직접 연결, MUX 미사용) ──── */
     gpio.Mode = GPIO_MODE_INPUT;
@@ -361,6 +361,75 @@ uint16_t EE_ScanMuxMapping(uint8_t idx)
     EE_WriteDisable(idx);
 
     return hit;   /* 비트마스크: bit N = MUX ch N 에서 HIGH 읽힘 */
+}
+
+/* ── 전체 GPIO IDR 스캔 (write 후 GPIOA~D 전체 읽기) ────── */
+void EE_ScanAllGPIO(uint8_t idx, uint32_t out[4])
+{
+    out[0] = out[1] = out[2] = out[3] = 0;
+    if (idx >= EE_NUM_CHIPS) return;
+
+    EE_WriteEnable(idx);
+    clk_low(); din_low();
+    EE_CS_High(idx);
+    ee_delay();
+    ee_send_command(0x01, 0);
+    for (int i = 7; i >= 0; i--)
+        ee_send_bit((0xAA >> i) & 1);
+
+    EE_CS_Low(idx);
+    ee_delay();
+    EE_CS_High(idx);
+
+    volatile uint32_t wait = 25U * 3200U;
+    while (wait--) __NOP();
+
+    out[0] = GPIOA->IDR;
+    out[1] = GPIOB->IDR;
+    out[2] = GPIOC->IDR;
+    out[3] = GPIOD->IDR;
+
+    EE_CS_Low(idx);
+    EE_WriteDisable(idx);
+}
+
+/* ── DO 핀 직접 스캔 (write 후 12개 DO 핀 전부 읽기) ────── */
+uint16_t EE_ScanDOPins(uint8_t idx)
+{
+    if (idx >= EE_NUM_CHIPS)
+        return 0;
+
+    EE_WriteEnable(idx);
+
+    /* Write 명령 전송 */
+    clk_low();
+    din_low();
+    EE_CS_High(idx);
+    ee_delay();
+    ee_send_command(0x01, 0);
+    for (int i = 7; i >= 0; i--)
+        ee_send_bit((0xAA >> i) & 1);
+
+    /* CS LOW → 즉시 CS HIGH (ready/busy 모드) */
+    EE_CS_Low(idx);
+    ee_delay();
+    EE_CS_High(idx);
+
+    /* 쓰기 완료 대기 */
+    volatile uint32_t wait = 25U * 3200U;
+    while (wait--) __NOP();
+
+    /* 12개 DO 핀 전부 읽기 */
+    uint16_t hit = 0;
+    for (uint8_t d = 0; d < EE_NUM_CHIPS; d++) {
+        if (ee_do_table[d].port->IDR & ee_do_table[d].pin)
+            hit |= (1u << d);
+    }
+
+    EE_CS_Low(idx);
+    EE_WriteDisable(idx);
+
+    return hit;  /* bit D = 1 → ee_do_table[D] 핀에서 HIGH */
 }
 
 /* ── 읽기 전용 감지 (쓰기 없음) ─────────────────────────── */
