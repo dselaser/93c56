@@ -31,6 +31,33 @@ const EE_CSPin ee_cs_table[EE_NUM_CHIPS] = {
     { GPIOD, GPIO_PIN_2  },   /* CS11 - PD2  */
 };
 
+/* ── DO Pin Table (MCU 직접 연결) ────────────────────────────── */
+/* MUX(CD4067) 를 경유하지 않고 MCU GPIO 에서 직접 DO 를 읽는다.
+ * MUX 채널 매핑 불일치 및 미연결 문제를 근본적으로 해결. */
+/* 주의: 인덱스 = 칩 번호(CS_x), 값 = 해당 칩 DO 가 연결된 MCU 핀.
+ * PCB 라우팅으로 CS_x 의 DO 가 DO_x 넷이 아닐 수 있음.
+ * MUX 스캔 결과(CS04->ch9 등) 를 기반으로 매핑:
+ *   CS_x DO -> MUX ch_y -> 넷 DO_y -> MCU 핀              */
+const EE_CSPin ee_do_table[EE_NUM_CHIPS] = {
+    /* [CS]   실제 DO넷 -> MCU 핀            (근거)           */
+    { GPIOC, GPIO_PIN_2  },   /* CS00 -> DO0  -> PC2   (ch0  OK) */
+    { GPIOC, GPIO_PIN_3  },   /* CS01 -> DO1  -> PC3   (ch1  OK) */
+    { GPIOA, GPIO_PIN_0  },   /* CS02 -> DO2  -> PA0   (ch2  OK) */
+    { GPIOA, GPIO_PIN_1  },   /* CS03 -> DO3  -> PA1   (ch3  OK) */
+    { GPIOC, GPIO_PIN_5  },   /* CS04 -> DO9  -> PC5   (ch9  확인) */
+    { GPIOB, GPIO_PIN_0  },   /* CS05 -> DO10 -> PB0   (ch10 확인) */
+    { GPIOB, GPIO_PIN_1  },   /* CS06 -> DO11 -> PB1   (ch11 확인) */
+    { GPIOA, GPIO_PIN_3  },   /* CS07 -> DO5  -> PA3   (ch5  확인) */
+    { GPIOC, GPIO_PIN_4  },   /* CS08 -> DO8  -> PC4   (추정: 교체 테스트) */
+    { GPIOB, GPIO_PIN_10 },   /* CS09 -> DO6  -> PB10  (ch6  확인) */
+    { GPIOA, GPIO_PIN_6  },   /* CS10 -> DO7  -> PA6   (ch7  확인) */
+    { GPIOA, GPIO_PIN_2  },   /* CS11 -> DO4  -> PA2   (추정: 교체 테스트) */
+};
+
+/* 현재 활성 칩의 DO 포트/핀 (dout_read 에서 사용) */
+static GPIO_TypeDef *active_do_port = GPIOC;
+static uint16_t      active_do_pin  = GPIO_PIN_2;  /* DO0 기본값 */
+
 /* ── Timing Delay ────────────────────────────────────────────── */
 /* SystemCoreClock = 32 MHz → ~31.25ns/cycle
  * 93C56 min clock period ≈ 1µs → 16 cycles per half-period */
@@ -48,7 +75,8 @@ static inline void clk_high(void)  { EE_CLK_PORT->BSRR = EE_CLK_PIN; }
 static inline void clk_low(void)   { EE_CLK_PORT->BSRR = (uint32_t)EE_CLK_PIN << 16; }
 static inline void din_high(void)  { EE_DIN_PORT->BSRR = EE_DIN_PIN; }
 static inline void din_low(void)   { EE_DIN_PORT->BSRR = (uint32_t)EE_DIN_PIN << 16; }
-static inline uint8_t dout_read(void) { return (EE_DOUT_PORT->IDR & EE_DOUT_PIN) ? 1 : 0; }
+/* DO 읽기: MCU 직접 연결 핀에서 읽음 (MUX 미사용) */
+static inline uint8_t dout_read(void) { return (active_do_port->IDR & active_do_pin) ? 1 : 0; }
 
 /* Send one bit on DI, clock it */
 static void ee_send_bit(uint8_t bit)
@@ -126,35 +154,19 @@ void EE_GPIO_Init(void)
     HAL_GPIO_WritePin(EE_DIN_PORT, EE_DIN_PIN, GPIO_PIN_RESET);
     HAL_GPIO_Init(EE_DIN_PORT, &gpio);
 
-    /* ── Input: DOUT (from CD4067 mux) ─────────────────── */
+    /* ── Inputs: DO0~DO11 (MCU 직접 연결, MUX 미사용) ──── */
     gpio.Mode = GPIO_MODE_INPUT;
-    gpio.Pull = GPIO_PULLDOWN;
-    gpio.Pin  = EE_DOUT_PIN;
-    HAL_GPIO_Init(EE_DOUT_PORT, &gpio);
+    gpio.Pull = GPIO_PULLDOWN;     /* DO Hi-Z 시 LOW 읽힘 */
+    for (int i = 0; i < EE_NUM_CHIPS; i++) {
+        gpio.Pin = ee_do_table[i].pin;
+        HAL_GPIO_Init(ee_do_table[i].port, &gpio);
+    }
 
-    /* ── Outputs: Mux select A,B,C,D + INHIBIT ────────── */
+    /* ── MUX 비활성화: INHIBIT = HIGH (MUX 출력 차단) ── */
     gpio.Mode  = GPIO_MODE_OUTPUT_PP;
     gpio.Pull  = GPIO_NOPULL;
-    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
-
-    gpio.Pin = MUX_A_PIN;
-    HAL_GPIO_WritePin(MUX_A_PORT, MUX_A_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_Init(MUX_A_PORT, &gpio);
-
-    gpio.Pin = MUX_B_PIN;
-    HAL_GPIO_WritePin(MUX_B_PORT, MUX_B_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_Init(MUX_B_PORT, &gpio);
-
-    gpio.Pin = MUX_C_PIN;
-    HAL_GPIO_WritePin(MUX_C_PORT, MUX_C_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_Init(MUX_C_PORT, &gpio);
-
-    gpio.Pin = MUX_D_PIN;
-    HAL_GPIO_WritePin(MUX_D_PORT, MUX_D_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_Init(MUX_D_PORT, &gpio);
-
-    /* INHIBIT = HIGH (mux disabled initially) */
-    gpio.Pin = MUX_INH_PIN;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Pin   = MUX_INH_PIN;
     HAL_GPIO_WritePin(MUX_INH_PORT, MUX_INH_PIN, GPIO_PIN_SET);
     HAL_GPIO_Init(MUX_INH_PORT, &gpio);
 
@@ -165,22 +177,24 @@ void EE_GPIO_Init(void)
         HAL_GPIO_WritePin(ee_cs_table[i].port, ee_cs_table[i].pin, GPIO_PIN_RESET);
         HAL_GPIO_Init(ee_cs_table[i].port, &gpio);
     }
+
 }
 
-/* ── Mux Control ─────────────────────────────────────────────── */
+/* ── DO 칩 선택 (MUX 대신 MCU 직접 읽기) ─────────────────────── */
+
+/* 칩 idx 의 DO 핀을 활성화 (이후 dout_read() 가 해당 핀에서 읽음) */
 void EE_MuxSelect(uint8_t idx)
 {
-    HAL_GPIO_WritePin(MUX_A_PORT, MUX_A_PIN, (idx & 0x01) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(MUX_B_PORT, MUX_B_PIN, (idx & 0x02) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(MUX_C_PORT, MUX_C_PIN, (idx & 0x04) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(MUX_D_PORT, MUX_D_PIN, (idx & 0x08) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    /* Allow mux settling time */
-    ee_delay();
-    ee_delay();
+    if (idx < EE_NUM_CHIPS) {
+        active_do_port = ee_do_table[idx].port;
+        active_do_pin  = ee_do_table[idx].pin;
+    }
 }
 
-void EE_MuxDisable(void) { HAL_GPIO_WritePin(MUX_INH_PORT, MUX_INH_PIN, GPIO_PIN_SET); }
-void EE_MuxEnable(void)  { HAL_GPIO_WritePin(MUX_INH_PORT, MUX_INH_PIN, GPIO_PIN_RESET); }
+/* 하위 호환용 (MUX 미사용이므로 no-op) */
+void EE_MuxSelectRaw(uint8_t ch) { (void)ch; }
+void EE_MuxDisable(void) { /* MUX 비활성화 상태 유지 */ }
+void EE_MuxEnable(void)  { /* MUX 미사용, no-op */ }
 
 /* ── Chip Select ─────────────────────────────────────────────── */
 void EE_CS_High(uint8_t idx)
@@ -297,6 +311,56 @@ bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data)
     EE_MuxDisable();
 
     return ok;
+}
+
+/* ── MUX 채널 매핑 스캔 (write 후 ready 상태에서 전 채널 탐색) ── */
+uint16_t EE_ScanMuxMapping(uint8_t idx)
+{
+    if (idx >= EE_NUM_CHIPS)
+        return 0;
+
+    /* 1. Write Enable */
+    EE_WriteEnable(idx);
+
+    /* 2. Write 명령 전송 (addr=0, data=0xAA) */
+    EE_MuxSelect(idx);
+    EE_MuxEnable();
+    clk_low();
+    din_low();
+    EE_CS_High(idx);
+    ee_delay();
+    ee_send_command(0x01, 0);           /* WRITE opcode + addr */
+    for (int i = 7; i >= 0; i--)
+        ee_send_bit((0xAA >> i) & 1);  /* 8-bit data */
+
+    /* 3. CS LOW → 즉시 CS HIGH: ready/busy 폴링 모드 진입
+     *    (CS LOW 동안 오래 기다리면 칩이 쓰기 완료 후
+     *     다음 CS HIGH 시 command 모드로 진입하여 DO 상태 불명확)
+     *    CS LOW → 바로 CS HIGH 해야 busy→ready 전이를 DO 로 관찰 가능 */
+    EE_CS_Low(idx);
+    ee_delay();
+    EE_CS_High(idx);
+
+    /* 4. 쓰기 완료 대기 (CS HIGH 유지, 93C56 max 10ms → 25ms 여유) */
+    volatile uint32_t wait = 25U * 3200U;   /* ~25ms */
+    while (wait--) __NOP();
+
+    /* 6. 16채널 MUX 스캔 (원시 채널 사용, 리매핑 없이) */
+    uint16_t hit = 0;
+    for (uint8_t ch = 0; ch < 16; ch++) {
+        EE_MuxSelectRaw(ch);
+        EE_MuxEnable();
+        ee_delay(); ee_delay(); ee_delay(); ee_delay();
+        if (dout_read())
+            hit |= (1u << ch);
+        EE_MuxDisable();
+    }
+
+    EE_CS_Low(idx);
+    EE_MuxDisable();
+    EE_WriteDisable(idx);
+
+    return hit;   /* 비트마스크: bit N = MUX ch N 에서 HIGH 읽힘 */
 }
 
 /* ── 읽기 전용 감지 (쓰기 없음) ─────────────────────────── */

@@ -32,7 +32,10 @@ extern volatile uint16_t    g_num_addrs;   /* 128 or 256 */
 #define EE_DOUT_PORT        GPIOC       /* CD4067 output → MCU input */
 #define EE_DOUT_PIN         GPIO_PIN_1
 
-/* CD4067 Mux select lines */
+/* CD4067 Mux select lines
+ * 주의: PCB 회로도에서 CD4067 Pin13(C)↔Pin14(D) 가 바뀌어 배선됨.
+ *       소프트웨어에서 C/D GPIO 를 교차 정의하여 보상.
+ *       MUX_C_PIN(PC9) → IC Pin14(실제 D), MUX_D_PIN(PC8) → IC Pin13(실제 C) */
 #define MUX_A_PORT          GPIOC
 #define MUX_A_PIN           GPIO_PIN_6
 #define MUX_B_PORT          GPIOC
@@ -54,14 +57,18 @@ typedef struct {
 } EE_CSPin;
 
 extern const EE_CSPin ee_cs_table[EE_NUM_CHIPS];
+extern const EE_CSPin ee_do_table[EE_NUM_CHIPS];  /* DO 직접 읽기 핀 */
 
 /* ── Driver API ──────────────────────────────────────────────── */
 
 /** Initialise all GPIO pins for 93C56 + mux (call once after HAL_Init) */
 void EE_GPIO_Init(void);
 
-/** Select mux channel (0-11) for reading DO from chip idx */
+/** Select mux channel for chip idx (PCB remap 적용) */
 void EE_MuxSelect(uint8_t idx);
+
+/** Select raw mux channel (0-15 직접 지정, 스캔/진단용) */
+void EE_MuxSelectRaw(uint8_t ch);
 
 /** Disable mux output (INHIBIT HIGH) */
 void EE_MuxDisable(void);
@@ -89,6 +96,11 @@ bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data);
 /** Detect if chip idx is present (pogo pin connected).
  *  Tries a read and checks for valid response. */
 bool EE_Detect(uint8_t idx);
+
+/** MUX 채널 매핑 스캔: chip idx에 write 후 ready 상태에서
+ *  16채널 MUX 를 순회하여 DO=HIGH 가 읽히는 채널 비트마스크 반환.
+ *  bit N = 1 → MUX channel N 에서 HIGH 감지됨 */
+uint16_t EE_ScanMuxMapping(uint8_t idx);
 
 /** 읽기 전용 감지 (쓰기 없음, 포그핀 불안정 시 안전). */
 bool EE_DetectReadOnly(uint8_t idx);

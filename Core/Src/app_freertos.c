@@ -669,17 +669,77 @@ void StartDetectTask(void *argument)
              pb4_idr,
              pb4_idr ? "*** HW SHORT/PULLUP ***" : "GPIO OK");
 
-    /* 1. MUX 채널별 유휴 DOUT 확인
-     *    MUX 활성화(INH=L) 후 DOUT 가 L 이면 MUX 경로 정상 + 칩 미연결
-     *    DOUT 가 H 이면 해당 채널 칩이 DO=H 로 구동 중 (이상) */
-    uart_log("[DIAG] -- MUX idle DOUT scan --\r\n");
+    /* 1. DO 직접 읽기 idle 스캔 (MUX 미사용, MCU GPIO 직접)
+     *    각 칩 DO 핀을 직접 읽어 idle 상태 확인 (CS LOW → DO Hi-Z → 풀다운 0) */
+    uart_log("[DIAG] -- DO direct idle scan --\r\n");
     for (uint8_t ch = 0; ch < EE_NUM_CHIPS; ch++) {
-        EE_MuxSelect(ch);
-        EE_MuxEnable();
+        EE_MuxSelect(ch);      /* active DO 핀 설정 */
         osDelay(1);
-        uint8_t dout_idle = HAL_GPIO_ReadPin(EE_DOUT_PORT, EE_DOUT_PIN) ? 1 : 0;
-        EE_MuxDisable();
-        uart_log("[DIAG] MUX ch%02u idle DOUT=%u\r\n", ch, dout_idle);
+        uint8_t dout_idle = HAL_GPIO_ReadPin(
+            ee_do_table[ch].port, ee_do_table[ch].pin) ? 1 : 0;
+        uart_log("[DIAG] DO%02u idle=%u\r\n", ch, dout_idle);
+    }
+
+    /* 1.5 CS08/CS11 GPIO 전체 포트 스캔:
+     *   write 후 ready 상태에서 GPIOA~D IDR 전체를 읽어
+     *   DO=HIGH 인 핀을 찾는다 (baseline 과 비교) */
+    uart_log("[DIAG] -- GPIO port scan for CS08,CS11 --\r\n");
+    {
+        /* baseline: 모든 CS LOW 상태에서 IDR 읽기 */
+        for (uint8_t c = 0; c < EE_NUM_CHIPS; c++) EE_CS_Low(c);
+        osDelay(2);
+        uint32_t base_a = GPIOA->IDR;
+        uint32_t base_b = GPIOB->IDR;
+        uint32_t base_c = GPIOC->IDR;
+        uint32_t base_d = GPIOD->IDR;
+
+        /* CS08, CS11 각각 write 후 IDR 스캔 */
+        uint8_t scan_chips[] = {8, 11};
+        for (int s = 0; s < 2; s++) {
+            uint8_t idx = scan_chips[s];
+
+            /* EWEN + WRITE */
+            EE_WriteEnable(idx);
+            EE_MuxSelect(idx);
+            EE_CS_High(idx);
+            /* 간단한 write: SB+WRITE(01)+addr(0)+data(0xAA) */
+            extern void EE_CS_Low(uint8_t);
+            extern void EE_CS_High(uint8_t);
+            /* write 명령은 EE_Write 내부에서 처리하므로
+             * 여기서는 EE_Write + 타임아웃 무시 후 직접 스캔 */
+            EE_Write(idx, 0, 0xAA);  /* TOUT 가능하지만 write 명령은 전송됨 */
+
+            /* write 명령 후 CS cycle → ready check */
+            EE_CS_Low(idx);
+            osDelay(1);
+            EE_CS_High(idx);
+            osDelay(30);  /* write 완료 대기 */
+
+            /* 전체 GPIO 포트 IDR 읽기 */
+            uint32_t now_a = GPIOA->IDR;
+            uint32_t now_b = GPIOB->IDR;
+            uint32_t now_c = GPIOC->IDR;
+            uint32_t now_d = GPIOD->IDR;
+
+            EE_CS_Low(idx);
+            EE_WriteDisable(idx);
+
+            /* baseline 대비 변화된 비트 = DO 핀 후보 */
+            uint32_t da = (now_a ^ base_a) & now_a;
+            uint32_t db = (now_b ^ base_b) & now_b;
+            uint32_t dc = (now_c ^ base_c) & now_c;
+            uint32_t dd = (now_d ^ base_d) & now_d;
+
+            uart_log("[DIAG] CS%02u GPIO: A=0x%04lX B=0x%04lX C=0x%04lX D=0x%04lX\r\n",
+                     idx, da, db, dc, dd);
+
+            if (da) for (int p=0;p<16;p++) if (da&(1<<p)) uart_log("  -> PA%d\r\n",p);
+            if (db) for (int p=0;p<16;p++) if (db&(1<<p)) uart_log("  -> PB%d\r\n",p);
+            if (dc) for (int p=0;p<16;p++) if (dc&(1<<p)) uart_log("  -> PC%d\r\n",p);
+            if (dd) for (int p=0;p<16;p++) if (dd&(1<<p)) uart_log("  -> PD%d\r\n",p);
+            if (!da && !db && !dc && !dd)
+                uart_log("  -> NO PIN CHANGE (chip not responding?)\r\n");
+        }
     }
 
     /* 2. 칩별 EWEN + Write(0xA5,addr255) + Read 단계별 진단
