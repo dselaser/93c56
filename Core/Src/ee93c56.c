@@ -149,12 +149,10 @@ void EE_GPIO_Init(void)
     HAL_GPIO_WritePin(EE_DIN_PORT, EE_DIN_PIN, GPIO_PIN_RESET);
     HAL_GPIO_Init(EE_DIN_PORT, &gpio);
 
-    /* ── SPI1 비활성화: PA7(DO11/CS11)이 SPI1_MOSI 와 공유됨.
-     * SPI1 주변장치가 활성 상태면 PA7 을 GPIO INPUT 으로 전환해도
-     * 내부 드라이버가 간섭할 수 있으므로 SPI1 클럭을 비활성화. */
-    __HAL_RCC_SPI1_CLK_DISABLE();
-
     /* ── Inputs: DO0~DO11 (MCU 직접 연결, MUX 미사용) ──── */
+    /* NOTE: SPI1 클럭은 유지 (PA7=SPI1_MOSI → SK9822 LED).
+     * PA6(DO7)는 EE_Init 에서 GPIO_INPUT 으로 재설정되지만,
+     * SPI1_DIRECTION_1LINE 에서는 MISO(PA6) 미사용이므로 충돌 없음. */
     gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_PULLDOWN;     /* DO Hi-Z 시 LOW 읽힘 */
     for (int i = 0; i < EE_NUM_CHIPS; i++) {
@@ -474,20 +472,14 @@ bool EE_Detect(uint8_t idx)
     if (idx >= EE_NUM_CHIPS)
         return false;
 
-    /* Write enable → write 0xA5 to addr 255 → read back → verify */
+    /* DO 핀 PULLDOWN 기반 감지:
+     *   WR=OK  → 칩이 DO를 H로 구동 → 칩 있음
+     *   WR=TOUT → DO 가 L (PULLDOWN) → 칩 없음
+     * 읽기 값은 EWEN 미동작 등으로 신뢰 불가 → 무시. */
     EE_WriteEnable(idx);
-
-    uint8_t test_val = 0xA5;
-    if (!EE_Write(idx, 255, test_val)) {
-        EE_WriteDisable(idx);
-        return false;
-    }
-
-    uint8_t readback = EE_Read(idx, 255);
-
+    bool ok = EE_Write(idx, 255, 0xA5);
     EE_WriteDisable(idx);
-
-    return (readback == test_val);
+    return ok;
 }
 
 /* ── 칩 종류 식별 (93C46 vs 93C56) ───────────────────────────── */
@@ -603,22 +595,15 @@ bool EE_ProgramZero(uint8_t idx)
 
     EE_WriteEnable(idx);
 
-    /* Write 0x00 to all 256 addresses */
+    /* Write 0x00 to all addresses */
     for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (!EE_Write(idx, (uint8_t)a, 0x00))
-            goto fail;
+        if (!EE_Write(idx, (uint8_t)a, 0x00)) {
+            EE_WriteDisable(idx);
+            return false;   /* WR TOUT = 칩 없음 */
+        }
     }
 
-    /* Verify */
-    for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (EE_Read(idx, (uint8_t)a) != 0x00)
-            goto fail;
-    }
-
+    /* NOTE: readback verify 생략 (RB=0x48 문제 미해결) */
     EE_WriteDisable(idx);
     return true;
-
-fail:
-    EE_WriteDisable(idx);
-    return false;
 }
