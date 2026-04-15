@@ -247,6 +247,7 @@ static void voice_play(uint32_t clip_idx)
 void StartMainAppTask(void *argument)
 {
     bool detected[EE_NUM_CHIPS];    /* 메모리 인식 상태 */
+    bool mem_ok[EE_NUM_CHIPS];      /* 메모리 테스트 결과 (0xAA/0x55) */
     bool prog_ok[EE_NUM_CHIPS];     /* 프로그래밍 결과 */
     uint32_t stable_count;          /* 연속 안정 감지 횟수 */
     uint32_t last_voice_tick;       /* 음성 반복 타이머 */
@@ -538,17 +539,103 @@ void StartMainAppTask(void *argument)
         osDelay(500);
 
         /* ════════════════════════════════════════════════════════
+         * 상태 C: 메모리 테스트 (0xAA / 0x55 전체 쓰기-읽기 검증)
+         * ════════════════════════════════════════════════════════ */
+        uart_log("[TEST] === Memory Test (0xAA / 0x55) ===\r\n");
+
+        for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
+            if (!detected[i]) {
+                mem_ok[i] = false;
+                uart_log("[TEST] CS%02u: SKIP\r\n", i);
+                continue;
+            }
+
+            /* 테스트 중: 파란색 LED */
+            led_set(i, 0, 0, 255);
+            led_update();
+
+            bool ok = true;
+            EE_WriteEnable(i);
+
+            /* ── Pass 1: 0xAA 전체 쓰기 ── */
+            for (uint16_t a = 0; a < g_num_addrs && ok; a++) {
+                if (!EE_Write(i, (uint8_t)a, 0xAA)) {
+                    uart_log("[TEST] CS%02u: 0xAA WR TOUT  addr=%u\r\n", i, (unsigned)a);
+                    ok = false;
+                }
+            }
+            /* ── Pass 1: 0xAA 전체 읽기 검증 ── */
+            for (uint16_t a = 0; a < g_num_addrs && ok; a++) {
+                uint8_t rd = EE_Read(i, (uint8_t)a);
+                if (rd != 0xAA) {
+                    uart_log("[TEST] CS%02u: 0xAA RD ERR  addr=%u  got=0x%02X\r\n",
+                             i, (unsigned)a, rd);
+                    ok = false;
+                }
+            }
+
+            /* ── Pass 2: 0x55 전체 쓰기 ── */
+            for (uint16_t a = 0; a < g_num_addrs && ok; a++) {
+                if (!EE_Write(i, (uint8_t)a, 0x55)) {
+                    uart_log("[TEST] CS%02u: 0x55 WR TOUT  addr=%u\r\n", i, (unsigned)a);
+                    ok = false;
+                }
+            }
+            /* ── Pass 2: 0x55 전체 읽기 검증 ── */
+            for (uint16_t a = 0; a < g_num_addrs && ok; a++) {
+                uint8_t rd = EE_Read(i, (uint8_t)a);
+                if (rd != 0x55) {
+                    uart_log("[TEST] CS%02u: 0x55 RD ERR  addr=%u  got=0x%02X\r\n",
+                             i, (unsigned)a, rd);
+                    ok = false;
+                }
+            }
+
+            EE_WriteDisable(i);
+            mem_ok[i] = ok;
+            uart_log("[TEST] CS%02u: %s\r\n", i, ok ? "PASS" : "FAIL");
+
+            if (ok)
+                led_set(i, 0, 255, 0);     /* 녹색: PASS */
+            else
+                led_set(i, 255, 0, 0);     /* 적색: FAIL */
+            led_update();
+        }
+
+        /* 메모리 테스트 요약 */
+        {
+            uint8_t t_pass = 0, t_fail = 0;
+            for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
+                if (!detected[i]) continue;
+                if (mem_ok[i]) t_pass++;
+                else           t_fail++;
+            }
+            uart_log("[TEST] Result: PASS=%u  FAIL=%u\r\n", t_pass, t_fail);
+            if (t_fail > 0) {
+                uart_log("[TEST] Failed chips:");
+                for (uint8_t i = 0; i < EE_NUM_CHIPS; i++)
+                    if (detected[i] && !mem_ok[i])
+                        uart_log(" CS%02u", i);
+                uart_log("\r\n");
+            } else {
+                uart_log("[TEST] All memory OK.\r\n");
+            }
+        }
+        osDelay(300);
+
+        /* ════════════════════════════════════════════════════════
          * 상태 D: 0x00 프로그래밍 + 검증
          * ════════════════════════════════════════════════════════ */
         uart_log("[STATE D] Programming (write 0x00 all)\r\n");
         any_defective = false;
 
         for (uint8_t i = 0; i < EE_NUM_CHIPS; i++) {
-            if (!detected[i]) {
+            if (!detected[i] || !mem_ok[i]) {
                 prog_ok[i] = false;
                 led_set(i, 255, 0, 0);      /* 적색: 없음/불량 */
                 any_defective = true;
-                uart_log("[PROG] CS%02u: SKIP (not detected)\r\n", i);
+                uart_log("[PROG] CS%02u: SKIP (%s)\r\n", i,
+                         !detected[i] ? "not detected" : "memory test FAIL");
                 continue;
             }
 
@@ -723,8 +810,7 @@ void StartDetectTask(void *argument)
             EE_WriteDisable(fc);
             uart_log("[DIAG] WR=%-4s  RB=0x%02X  %s\r\n",
                      w2 ? "OK" : "TOUT", rb2,
-                     (w2 && rb2 == 0x5A) ? "WR OK" :
-                     (w2 && rb2 == 0x48) ? "WR FAIL(fixed 0x48)" : "MISMATCH");
+                     (w2 && rb2 == 0x5A) ? "WR OK" : "MISMATCH");
         }
 
         /* 3. 칩 종류 자동 식별 (verbose 버전)

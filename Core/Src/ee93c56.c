@@ -276,8 +276,10 @@ uint8_t EE_Read(uint8_t idx, uint8_t addr)
     /* READ: opcode = 10 */
     ee_send_command(0x02, addr);
 
-    /* Dummy bit (leading zero before data) */
-    ee_recv_bit();
+    /* 이 93C56은 READ 후 더미 비트를 출력하지 않음 —
+     * 마지막 어드레스 CLK 하강 직후 D7 이 바로 출력됨.
+     * (더미 비트를 스킵하면 D7 을 버려 1비트 좌이동 오류 발생) */
+    ee_delay();   /* 칩이 D7 을 드라이브할 시간 확보 (tV ≤ 200ns) */
 
     /* Read 8-bit data MSB first */
     uint8_t data = 0;
