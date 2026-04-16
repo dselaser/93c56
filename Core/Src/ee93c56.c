@@ -95,12 +95,12 @@ static uint8_t ee_recv_bit(void)
 }
 
 /* Send start bit + opcode(2) + address(g_addr_bits) */
-static void ee_send_command(uint8_t opcode, uint8_t addr)
+static void ee_send_command(uint8_t opcode, uint16_t addr)
 {
     ee_send_bit(1);  /* Start bit */
     ee_send_bit((opcode >> 1) & 1);  /* Opcode MSB */
     ee_send_bit(opcode & 1);         /* Opcode LSB */
-    /* Address: g_addr_bits (7 for 93C46, 8 for 93C56) */
+    /* Address: g_addr_bits (7=93C46, 8=93C56, 9=93C66) */
     for (int i = g_addr_bits - 1; i >= 0; i--)
         ee_send_bit((addr >> i) & 1);
 }
@@ -262,8 +262,38 @@ void EE_WriteDisable(uint8_t idx)
     EE_MuxDisable();
 }
 
+/* ── Erase All (ERAL) ────────────────────────────────────────── */
+bool EE_EraseAll(uint8_t idx)
+{
+    EE_MuxSelect(idx);
+    EE_MuxEnable();
+    clk_low();
+    din_low();
+
+    EE_CS_High(idx);
+    ee_delay();
+
+    /* ERAL: SB(1) + 00 + 10 + (addr_bits-2)개 0
+     * Erases all cells to 0xFF; EWEN must be sent first */
+    ee_send_bit(1);
+    ee_send_bit(0);
+    ee_send_bit(0);
+    ee_send_bit(1);
+    ee_send_bit(0);
+    for (int i = 0; i < (int)g_addr_bits - 2; i++)
+        ee_send_bit(0);
+
+    /* Wait for erase completion (DO goes HIGH when done) */
+    bool ok = ee_wait_ready(idx, 20);
+
+    EE_CS_Low(idx);
+    ee_delay();
+    EE_MuxDisable();
+    return ok;
+}
+
 /* ── Read (x8: 8-bit data) ───────────────────────────────────── */
-uint8_t EE_Read(uint8_t idx, uint8_t addr)
+uint8_t EE_Read(uint8_t idx, uint16_t addr)
 {
     EE_MuxSelect(idx);
     EE_MuxEnable();
@@ -294,7 +324,7 @@ uint8_t EE_Read(uint8_t idx, uint8_t addr)
 }
 
 /* ── Write (x8: 8-bit data) ──────────────────────────────────── */
-bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data)
+bool EE_Write(uint8_t idx, uint16_t addr, uint8_t data)
 {
     EE_MuxSelect(idx);
     EE_MuxEnable();
@@ -561,23 +591,23 @@ bool EE_TestMemory(uint8_t idx)
 
     EE_WriteEnable(idx);
 
-    /* Pass 1: write 0xAA to all 256 addresses, verify */
+    /* Pass 1: write 0xAA to all addresses, verify */
     for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (!EE_Write(idx, (uint8_t)a, 0xAA))
+        if (!EE_Write(idx, a, 0xAA))
             goto fail;
     }
     for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (EE_Read(idx, (uint8_t)a) != 0xAA)
+        if (EE_Read(idx, a) != 0xAA)
             goto fail;
     }
 
-    /* Pass 2: write 0x55 to all 256 addresses, verify */
+    /* Pass 2: write 0x55 to all addresses, verify */
     for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (!EE_Write(idx, (uint8_t)a, 0x55))
+        if (!EE_Write(idx, a, 0x55))
             goto fail;
     }
     for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (EE_Read(idx, (uint8_t)a) != 0x55)
+        if (EE_Read(idx, a) != 0x55)
             goto fail;
     }
 
@@ -599,7 +629,7 @@ bool EE_ProgramZero(uint8_t idx)
 
     /* Write 0x00 to all addresses */
     for (uint16_t a = 0; a < g_num_addrs; a++) {
-        if (!EE_Write(idx, (uint8_t)a, 0x00)) {
+        if (!EE_Write(idx, a, 0x00)) {
             EE_WriteDisable(idx);
             return false;   /* WR TOUT = 칩 없음 */
         }

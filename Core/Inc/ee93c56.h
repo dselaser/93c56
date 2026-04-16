@@ -9,16 +9,17 @@
 #define EE_NUM_CHIPS        12
 #define EE_WORD_BITS        8       /* x8 organisation */
 
-/* 93C46: 7-bit addr, 128 bytes  /  93C56: 8-bit addr, 256 bytes */
+/* 93C46: 7-bit addr, 128 bytes  /  93C56: 8-bit addr, 256 bytes  /  93C66: 9-bit addr, 512 bytes */
 typedef enum {
     EE_CHIP_UNKNOWN = 0,
     EE_CHIP_93C46,      /* 1Kbit: 128 x 8 */
     EE_CHIP_93C56,      /* 2Kbit: 256 x 8 */
+    EE_CHIP_93C66,      /* 4Kbit: 512 x 8 */
 } EE_ChipType;
 
 extern volatile EE_ChipType g_chip_type;
-extern volatile uint8_t     g_addr_bits;   /* 7 or 8 */
-extern volatile uint16_t    g_num_addrs;   /* 128 or 256 */
+extern volatile uint8_t     g_addr_bits;   /* 7, 8, or 9 */
+extern volatile uint16_t    g_num_addrs;   /* 128, 256, or 512 */
 
 /* ── GPIO Pin Definitions ────────────────────────────────────── */
 
@@ -86,12 +87,16 @@ void EE_WriteEnable(uint8_t idx);
 /** Disable erase/write operations on chip idx */
 void EE_WriteDisable(uint8_t idx);
 
-/** Read one 8-bit byte from chip idx at given address */
-uint8_t EE_Read(uint8_t idx, uint8_t addr);
+/** Read one 8-bit byte from chip idx at given address (up to 9-bit for 93C66) */
+uint8_t EE_Read(uint8_t idx, uint16_t addr);
 
-/** Write one 8-bit byte to chip idx at given address.
+/** Write one 8-bit byte to chip idx at given address (up to 9-bit for 93C66).
  *  Returns true if write completed successfully. */
-bool EE_Write(uint8_t idx, uint8_t addr, uint8_t data);
+bool EE_Write(uint8_t idx, uint16_t addr, uint8_t data);
+
+/** Erase all cells to 0xFF (ERAL command).
+ *  Must be called after EE_WriteEnable. Returns true if completed. */
+bool EE_EraseAll(uint8_t idx);
 
 /** 전체 GPIO IDR 스캔: write 후 ready 상태에서 GPIOA~D IDR 읽기.
  *  out[0]=GPIOA, out[1]=GPIOB, out[2]=GPIOC, out[3]=GPIOD */
