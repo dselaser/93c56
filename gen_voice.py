@@ -1,178 +1,231 @@
 """
 gen_voice.py
-Windows SAPI5 TTS (win32com 직접 제어) 를 사용하여
-93C56 검사기 음성 데이터를 Core/Src/voice_data.c 로 생성합니다.
+Microsoft Edge Neural TTS (edge-tts, ko-KR-InJoonNeural) 로 합성 →
+22050 Hz 16-bit mono PCM → G.711 μ-law 8-bit 압축 →
+Core/Inc/voice_data.h 및 Core/Src/voice_data.c 자동 생성.
 
-필요 패키지:
-    pip install pywin32 numpy
+필요 패키지 (ffmpeg 불필요):
+    python -m pip install edge-tts miniaudio numpy
 
 실행:
     python gen_voice.py
+
+인코딩 포맷 (펌웨어 디코더와 1:1 일치):
+    - 샘플레이트: 22050 Hz (HAL I2S_AUDIOFREQ_22K 표준)
+    - 저장 포맷 : 8-bit G.711 μ-law (ITU-T 표준)
+    - 디코드   : 256-entry int16 LUT (voice_ulaw_table)
+    - 용량     : 22050 × 1B = 22 KB/s
+                 14초 음성 ≈ 300 KB (기존 ADPCM과 비슷)
 """
 
-import os, wave, tempfile
+import os
+import asyncio
+import tempfile
 import numpy as np
-import win32com.client
+import edge_tts
+import miniaudio
 
 OUTPUT_C    = "Core/Src/voice_data.c"
 OUTPUT_H    = "Core/Inc/voice_data.h"
-TARGET_RATE = 16000  # STM32 I2S 샘플레이트 (16kHz — 8kHz 대비 음질 향상)
+TARGET_RATE = 22050                     # HAL I2S_AUDIOFREQ_22K
+VOICE_KO    = "ko-KR-InJoonNeural"      # Neural (남성, 한국어)
+GAIN        = 1.0                       # Neural TTS는 이미 풀스케일 — 1.0 권장
 
-# 음성 클립 정의 (voice_data.h 의 인덱스와 동일)
-#   (name, voice_gender, text)
-#   KO = Microsoft Heami
+# 음성 클립 정의 — (심볼명, 텍스트)
 CLIPS = [
-    ("place_board",     "KO", "디아지용 팁 보드를 올려주세요"),
-    ("complete",        "KO", "프로그램이 완료되었습니다"),
-    ("defective",       "KO", "적색 표시는 불량입니다"),
-    ("remove_board",    "KO", "보드를 분리하여 주십시요"),
-    ("board_removed",   "KO", "보드가 분리되었습니다"),
-    ("place_new_board", "KO", "새 보드를 올려 주십시요"),
-    ("prog_start",      "KO", "프로그램을 시작합니다"),
+    ("place_board",     "디아지용 팁 보드를 올려주세요"),
+    ("complete",        "프로그램이 완료되었습니다"),
+    ("defective",       "적색 표시는 불량입니다"),
+    ("remove_board",    "보드를 분리하여 주십시요"),
+    ("board_removed",   "보드가 분리되었습니다"),
+    ("place_new_board", "새 보드를 올려 주십시요"),
+    ("prog_start",      "프로그램을 시작합니다"),
 ]
 
-# ── SAPI5 화자 ID 수집 ───────────────────────────────────────
-sapi = win32com.client.Dispatch("SAPI.SpVoice")
-voice_id = {"KO": None, "EN": None}
-for v in sapi.GetVoices():
-    lang = v.GetAttribute("Language") or ""
-    name = v.GetAttribute("Name") or ""
-    if "412" in lang or "ko" in name.lower() or "heami" in name.lower():
-        voice_id["KO"] = v
-        print(f"KO 화자: {name}")
-    elif "409" in lang or "zira" in name.lower() or "en-us" in name.lower():
-        voice_id["EN"] = v
-        print(f"EN 화자: {name}")
+# ═══════════════════════════════════════════════════════════════════
+# edge-tts : 텍스트 → mp3
+# ═══════════════════════════════════════════════════════════════════
+async def synth_mp3(text, mp3_path):
+    communicate = edge_tts.Communicate(text, VOICE_KO)
+    await communicate.save(mp3_path)
 
-if voice_id["KO"] is None:
-    raise RuntimeError("Korean SAPI5 voice not found")
-if voice_id["EN"] is None:
-    print("EN 화자 없음 → KO 화자로 대체")
-    voice_id["EN"] = voice_id["KO"]
+# ═══════════════════════════════════════════════════════════════════
+# mp3 → 22050 Hz / 16-bit / mono PCM
+# ═══════════════════════════════════════════════════════════════════
+def mp3_to_pcm(mp3_path, gain=1.0):
+    decoded = miniaudio.decode_file(
+        mp3_path,
+        output_format=miniaudio.SampleFormat.SIGNED16,
+        nchannels=1,
+        sample_rate=TARGET_RATE,
+    )
+    pcm = np.array(decoded.samples, dtype=np.int16).astype(np.float32)
+    if gain != 1.0:
+        pcm = pcm * gain
+    return np.clip(pcm, -32768, 32767).astype(np.int16)
 
-# ── WAV → 8kHz int16 모노 PCM 변환 ──────────────────────────
-def wav_to_pcm(wav_path):
-    with wave.open(wav_path, "r") as wf:
-        src_rate   = wf.getframerate()
-        n_ch       = wf.getnchannels()
-        sampwidth  = wf.getsampwidth()
-        n_frames   = wf.getnframes()
-        raw        = wf.readframes(n_frames)
+# ═══════════════════════════════════════════════════════════════════
+# G.711 μ-law 인코더 (ITU-T 표준)
+# ═══════════════════════════════════════════════════════════════════
+_ULAW_EXP_LUT = bytes([
+    0,0,1,1,2,2,2,2,3,3,3,3,3,3,3,3,
+    4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+])
 
-    if sampwidth == 2:
-        pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-    elif sampwidth == 4:
-        pcm = np.frombuffer(raw, dtype=np.int32).astype(np.float32)
-        pcm = (pcm / 65536).astype(np.float32)
-    else:
-        raise ValueError(f"지원하지 않는 샘플 폭: {sampwidth}")
+def ulaw_encode(pcm16):
+    """int16 PCM → μ-law 8-bit bytes (G.711)"""
+    BIAS = 0x84
+    CLIP = 32635
+    out = bytearray(len(pcm16))
+    for i in range(len(pcm16)):
+        s = int(pcm16[i])
+        if s < 0:
+            sign = 0x80
+            s = -s
+        else:
+            sign = 0
+        if s > CLIP:
+            s = CLIP
+        s += BIAS
+        exponent = _ULAW_EXP_LUT[(s >> 7) & 0xFF]
+        mantissa = (s >> (exponent + 3)) & 0x0F
+        out[i] = (~(sign | (exponent << 4) | mantissa)) & 0xFF
+    return bytes(out)
 
-    if n_ch == 2:
-        pcm = pcm.reshape(-1, 2).mean(axis=1)
+def ulaw_decode_table():
+    """256-entry μ-law → int16 LUT (펌웨어 디코더용)"""
+    BIAS = 0x84
+    table = [0] * 256
+    for byte in range(256):
+        b = (~byte) & 0xFF
+        sign = b & 0x80
+        exp  = (b >> 4) & 0x07
+        mant = b & 0x0F
+        val  = ((mant << 3) + BIAS) << exp
+        val -= BIAS
+        if sign:
+            val = -val
+        table[byte] = val
+    return table
 
-    n_src = len(pcm)
-    n_dst = int(n_src * TARGET_RATE / src_rate)
-    pcm_8k = np.interp(np.linspace(0, n_src - 1, n_dst), np.arange(n_src), pcm)
-    pcm_8k = pcm_8k * 3.0   # 음량 3배 증폭
-    return np.clip(pcm_8k, -32768, 32767).astype(np.int16).tolist()
+# ═══════════════════════════════════════════════════════════════════
+# 메인
+# ═══════════════════════════════════════════════════════════════════
+def main():
+    print(f"Voice: {VOICE_KO}, target: {TARGET_RATE} Hz, gain: {GAIN}x, codec: μ-law 8bit")
+    all_clips = []
 
-# ── 각 클립 생성 (win32com: 매 호출마다 독립 SpFileStream) ──
-COLS = 16
-all_arrays = []
+    for i, (name, text) in enumerate(CLIPS):
+        print(f"[{i+1}/{len(CLIPS)}] '{text}'")
 
-for i, (name, vkey, text) in enumerate(CLIPS):
-    print(f"[{i+1}/{len(CLIPS)}] [{vkey}] '{text}' 생성 중...")
+        tmp_mp3 = tempfile.mktemp(suffix=f"_{name}.mp3")
+        asyncio.run(synth_mp3(text, tmp_mp3))
 
-    tmp = tempfile.mktemp(suffix=f"_{name}.wav")
+        pcm  = mp3_to_pcm(tmp_mp3, gain=GAIN)
+        os.remove(tmp_mp3)
 
-    # SpFileStream 으로 직접 WAV 파일에 출력
-    stream = win32com.client.Dispatch("SAPI.SpFileStream")
-    stream.Open(tmp, 3)   # 3 = SSFMCreateForWrite
-    sapi.AudioOutputStream = stream
-    sapi.Voice = voice_id[vkey]
-    sapi.Speak(text)      # 동기 호출 (기본값 SVSFDefault=0)
-    stream.Close()
+        data = ulaw_encode(pcm)
 
-    samples = wav_to_pcm(tmp)
-    os.remove(tmp)
+        n_samp = len(pcm)
+        n_byte = len(data)
+        dur    = n_samp / TARGET_RATE
+        print(f"      → {n_samp} samples ({dur:.2f}s), μ-law {n_byte} B ({n_byte/1024:.1f} KB)")
 
-    n = len(samples)
-    dur = n / TARGET_RATE
-    print(f"      → {n} samples ({dur:.2f}s), {n*2/1024:.1f} KB")
+        all_clips.append((name, text, n_samp, n_byte, dur, data))
 
-    rows = []
-    for j in range(0, n, COLS):
-        chunk = samples[j : j + COLS]
-        rows.append("    " + ", ".join(f"{s:6d}" for s in chunk) + ",")
-    all_arrays.append((name, vkey, text, n, dur, rows))
+    # ── .c 파일 출력 ───────────────────────────────────────────
+    print(f"\n{OUTPUT_C} 생성 중...")
+    lines = []
+    lines.append(
+        f"/* voice_data.c  —  자동 생성 파일, 수정하지 마세요.\n"
+        f" * 포맷    : {TARGET_RATE} Hz, G.711 μ-law 8-bit, mono\n"
+        f" * 생성 도구: gen_voice.py  (edge-tts {VOICE_KO}) */\n\n"
+        f"#include \"voice_data.h\"\n"
+    )
 
-# ── C 파일 생성 ──────────────────────────────────────────────
-print(f"\n{OUTPUT_C} 생성 중...")
-lines = []
-lines.append(f"""\
-/* voice_data.c  —  자동 생성 파일, 수정하지 마세요.
- * 포맷    : {TARGET_RATE} Hz, 16-bit signed mono PCM
- * 생성 도구: gen_voice.py  (win32com SAPI5: Heami KO) */
-
-#include "voice_data.h"
-""")
-
-for name, vkey, text, n, dur, rows in all_arrays:
-    lines.append(f"/* [{vkey}] '{text}' ({dur:.2f}s, {n} samples) */")
-    lines.append(f"static const int16_t voice_{name}[{n}] = {{")
-    lines.extend(rows)
+    # μ-law 디코드 LUT
+    tbl = ulaw_decode_table()
+    lines.append("/* G.711 μ-law → int16 PCM 디코드 LUT (ITU-T 표준) */")
+    lines.append("const int16_t voice_ulaw_table[256] = {")
+    for row_off in range(0, 256, 8):
+        chunk = tbl[row_off:row_off + 8]
+        lines.append("    " + ", ".join(f"{v:6d}" for v in chunk) + ",")
     lines.append("};\n")
 
-lines.append(f"const VoiceClip voice_clips[VOICE_NUM_CLIPS] = {{")
-for name, vkey, text, n, dur, rows in all_arrays:
-    lines.append(f"    {{ voice_{name}, {n}UL }},  /* [{vkey}] {text} */")
-lines.append("};")
-lines.append("")
+    # 각 클립 데이터
+    for name, text, n_samp, n_byte, dur, data in all_clips:
+        lines.append(f"/* '{text}' ({dur:.2f}s, {n_samp} samples, {n_byte} B) */")
+        lines.append(f"static const uint8_t voice_{name}[{n_byte}] = {{")
+        for row_off in range(0, n_byte, 16):
+            chunk = data[row_off:row_off + 16]
+            lines.append("    " + ", ".join(f"0x{b:02X}" for b in chunk) + ",")
+        lines.append("};\n")
 
-os.makedirs(os.path.dirname(OUTPUT_C), exist_ok=True)
-with open(OUTPUT_C, "w", encoding="utf-8") as f:
-    f.write("\n".join(lines))
+    lines.append("const VoiceClip voice_clips[VOICE_NUM_CLIPS] = {")
+    for name, text, n_samp, n_byte, dur, data in all_clips:
+        lines.append(f"    {{ voice_{name}, {n_samp}UL }},  /* {text} */")
+    lines.append("};")
+    lines.append("")
 
-# ── H 파일은 수동 관리 (덮어쓰기 안 함) ─────────────────────
-print(f"{OUTPUT_H} 은 수동 관리 파일 → 건드리지 않음")
-if False:  # H 파일 자동생성 비활성화
-  print(f"{OUTPUT_H} 생성 중...")
-h_src = """\
-#ifndef VOICE_DATA_H
-#define VOICE_DATA_H
+    os.makedirs(os.path.dirname(OUTPUT_C), exist_ok=True)
+    with open(OUTPUT_C, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
-#include <stdint.h>
+    # ── .h 파일 출력 ───────────────────────────────────────────
+    print(f"{OUTPUT_H} 생성 중...")
+    h_lines = []
+    h_lines.append("#ifndef VOICE_DATA_H")
+    h_lines.append("#define VOICE_DATA_H")
+    h_lines.append("")
+    h_lines.append("#include <stdint.h>")
+    h_lines.append("")
+    h_lines.append("/* gen_voice.py 로 자동 생성 — 93C56 검사기 음성 클립")
+    h_lines.append(f" * 포맷: {TARGET_RATE} Hz, G.711 μ-law 8-bit, mono")
+    h_lines.append(f" * 화자: {VOICE_KO} (edge-tts Neural)")
+    h_lines.append(" *")
+    h_lines.append(" * 인덱스:")
+    for i, (name, text) in enumerate(CLIPS):
+        h_lines.append(f" *   {i} = VOICE_{name.upper():<16s} \"{text}\"")
+    h_lines.append(" */")
+    h_lines.append("")
+    h_lines.append(f"#define VOICE_NUM_CLIPS    {len(CLIPS)}")
+    h_lines.append(f"#define VOICE_SAMPLE_RATE  {TARGET_RATE}u")
+    h_lines.append("")
+    for i, (name, _) in enumerate(CLIPS):
+        h_lines.append(f"#define VOICE_{name.upper():<16s} {i}")
+    h_lines.append("")
+    h_lines.append("typedef struct {")
+    h_lines.append("    const uint8_t *ulaw;         /* G.711 μ-law 바이트 스트림 */")
+    h_lines.append("    uint32_t       sample_count; /* 총 샘플 수 = 바이트 수 */")
+    h_lines.append("} VoiceClip;")
+    h_lines.append("")
+    h_lines.append("extern const VoiceClip voice_clips[VOICE_NUM_CLIPS];")
+    h_lines.append("extern const int16_t   voice_ulaw_table[256];")
+    h_lines.append("")
+    h_lines.append("#endif /* VOICE_DATA_H */")
+    h_lines.append("")
 
-/* gen_voice.py 로 자동 생성 — 93C56 검사기 음성 클립
- * 포맷: 8 kHz, 16-bit signed mono PCM
- *
- * 인덱스:
- *   0 = VOICE_PLACE_BOARD   "디아지용 팁 보드를 올려주세요"
- *   1 = VOICE_COMPLETE      "프로그램이 완료되었습니다"
- *   2 = VOICE_DEFECTIVE     "적색 표시는 불량입니다"
- *   3 = VOICE_REMOVE_BOARD  "보드를 분리하여 주십시요"
- */
+    os.makedirs(os.path.dirname(OUTPUT_H), exist_ok=True)
+    with open(OUTPUT_H, "w", encoding="utf-8") as f:
+        f.write("\n".join(h_lines))
 
-#define VOICE_NUM_CLIPS      4
+    total_kb = sum(n_byte for _, _, _, n_byte, _, _ in all_clips) / 1024
+    print(f"\n완료! 플래시 사용량: {total_kb:.1f} KB")
+    print("STM32CubeIDE 에서 Refresh 후 빌드·플래시하세요.")
 
-#define VOICE_PLACE_BOARD    0
-#define VOICE_COMPLETE       1
-#define VOICE_DEFECTIVE      2
-#define VOICE_REMOVE_BOARD   3
-
-typedef struct {
-    const int16_t  *data;
-    uint32_t        count;
-} VoiceClip;
-
-extern const VoiceClip voice_clips[VOICE_NUM_CLIPS];
-
-#endif /* VOICE_DATA_H */
-"""
-os.makedirs(os.path.dirname(OUTPUT_H), exist_ok=True)
-with open(OUTPUT_H, "w", encoding="utf-8") as f:
-    f.write(h_src)
-
-total_kb = sum(n for _, _, _, n, _, _ in all_arrays) * 2 / 1024
-print(f"\n완료! 총 플래시 사용량: {total_kb:.1f} KB")
-print("STM32CubeIDE 에서 Refresh 후 빌드·플래시하세요.")
+if __name__ == "__main__":
+    main()

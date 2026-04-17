@@ -212,27 +212,29 @@ static void led_all_set(uint8_t r, uint8_t g, uint8_t b)
     led_update();
 }
 
-/* ── 음성 재생 (mainAppTask 에서 직접 I2S 출력) ─────────────── */
+/* ── 음성 재생 (G.711 μ-law 8-bit → int16 PCM LUT 디코드) ────── */
 
-#define AUDIO_CHUNK_FRAMES  16
+#define AUDIO_CHUNK_FRAMES  32
 #define AUDIO_CHUNK_WORDS   (AUDIO_CHUNK_FRAMES * 2)  /* 스테레오 L+R */
 
 static void voice_play(uint32_t clip_idx)
 {
     if (clip_idx >= VOICE_NUM_CLIPS) return;
 
-    const int16_t *src       = voice_clips[clip_idx].data;
-    uint32_t       remaining = voice_clips[clip_idx].count;
-    int16_t        buf[AUDIO_CHUNK_WORDS];
+    const VoiceClip *clip      = &voice_clips[clip_idx];
+    const uint8_t   *src       = clip->ulaw;
+    uint32_t         remaining = clip->sample_count;
+    int16_t          buf[AUDIO_CHUNK_WORDS];
 
-    while (remaining > 0)
+    while (remaining > 0u)
     {
         uint32_t chunk = (remaining >= AUDIO_CHUNK_FRAMES)
                          ? AUDIO_CHUNK_FRAMES : remaining;
 
-        for (uint32_t i = 0; i < chunk; i++) {
-            buf[i * 2]     = src[i];   /* Left  */
-            buf[i * 2 + 1] = src[i];   /* Right */
+        for (uint32_t i = 0u; i < chunk; i++) {
+            int16_t sample = voice_ulaw_table[src[i]];
+            buf[i * 2]     = sample;   /* Left  */
+            buf[i * 2 + 1] = sample;   /* Right */
         }
 
         HAL_I2S_Transmit(&hi2s3, (uint16_t *)buf,
