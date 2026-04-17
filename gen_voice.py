@@ -16,20 +16,19 @@ import win32com.client
 
 OUTPUT_C    = "Core/Src/voice_data.c"
 OUTPUT_H    = "Core/Inc/voice_data.h"
-TARGET_RATE = 8000   # STM32 I2S 샘플레이트
+TARGET_RATE = 16000  # STM32 I2S 샘플레이트 (16kHz — 8kHz 대비 음질 향상)
 
 # 음성 클립 정의 (voice_data.h 의 인덱스와 동일)
 #   (name, voice_gender, text)
 #   KO = Microsoft Heami
 CLIPS = [
-    ("intro",        "KO", "이장치는 디에스이 아이엔시의   디아지 팁용   프로그래머 입니다"),
-    ("place_board",  "KO", "디아지용 팁 보드를 올려주세요"),
-    ("complete",     "KO", "프로그램이 완료되었습니다"),
-    ("defective",    "KO", "적색 표시는 불량입니다"),
-    ("remove_board", "KO", "보드를 분리하여 주십시요"),
-    ("is_93c56",      "KO", "93 C 56 보드입니다"),
-    ("is_93c46",      "KO", "93 C 46 보드입니다"),
-    ("board_removed", "KO", "보드가 분리되었습니다"),
+    ("place_board",     "KO", "디아지용 팁 보드를 올려주세요"),
+    ("complete",        "KO", "프로그램이 완료되었습니다"),
+    ("defective",       "KO", "적색 표시는 불량입니다"),
+    ("remove_board",    "KO", "보드를 분리하여 주십시요"),
+    ("board_removed",   "KO", "보드가 분리되었습니다"),
+    ("place_new_board", "KO", "새 보드를 올려 주십시요"),
+    ("prog_start",      "KO", "프로그램을 시작합니다"),
 ]
 
 # ── SAPI5 화자 ID 수집 ───────────────────────────────────────
