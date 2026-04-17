@@ -90,7 +90,7 @@ static uint8_t  g_src_data[128];
  *   Row1: U23(CS4) U24(CS5) U25(CS6) U26(CS7)
  *   Row2: U27(CS8) U28(CS9) U29(CS10) U30(CS11)
  * ────────────────────────────────────────────────────────── */
-#define PROG_SRC_CS   0u   /* U19: 템플릿 소스 슬롯 (최초 1회 읽기) */
+/* PROG_SRC_CS = CS00 — 보드 삽입 시 CS00 읽기로 템플릿 로드, CS01-CS11 포함 복제 */
 /* USER CODE END Definitions */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -256,6 +256,26 @@ static bool ee_present_safe(uint8_t idx)
     return (EE_Read(idx, 0u) == 0xA5u);
 }
 
+/* 보드 삽입 감지 — CS11 사용 (CS00 원본 데이터 보호)
+ * ee_wait_ready 타임아웃(20ms) 을 최대 400ms 에 1회만 수행 → LED 쇼 속도 향상.
+ * 이전 검사가 400ms 이내이면 false 반환(마지막 결과 미캐시) — 루프 계속. */
+static bool board_detect(void)
+{
+    static uint32_t last_check_ms = 0u;
+    uint32_t now = HAL_GetTick();
+    if ((now - last_check_ms) < 400u)
+        return false;      /* 아직 너무 이르다 → 검사 생략 */
+    last_check_ms = now;
+    return ee_present_safe(11u);
+}
+
+/* 보드 제거 감지 (읽기 전용) — CS00 addr 0x7F 읽기 비교
+ * 칩이 없으면 DO 부유 → 읽기값 ≠ g_src_data[0x7F] → false 반환. */
+static bool board_still_present_ro(void)
+{
+    return (EE_Read(0u, 0x7Fu) == g_src_data[0x7Fu]);
+}
+
 /**
  * @brief 93C46 대량 프로그래밍 태스크
  *
@@ -270,7 +290,6 @@ void StartMainAppTask(void *argument)
 {
     bool prog_ok[EE_NUM_CHIPS];
     uint8_t pass_cnt, fail_cnt;
-    static bool template_loaded = false;
 
     /* ── 전원 ON 인트로 ── */
     uart_log("\r\n=== 93C46 Mass Programmer (DSE INC) ===\r\n");
@@ -294,6 +313,11 @@ void StartMainAppTask(void *argument)
     g_detect_enable = false;   /* detect 주기 루프 비활성화 */
     uart_log("[INIT] addr_bits=%u, num_addrs=%u\r\n",
              (unsigned)g_addr_bits, (unsigned)g_num_addrs);
+
+    /* 템플릿 하드코딩: 전체 0x00, addr 0x7F = 0x92 (ATMega 인식키) */
+    memset(g_src_data, 0x00u, sizeof(g_src_data));
+    g_src_data[0x7Fu] = 0x92u;
+    uart_log("[INIT] Template: all 0x00, addr 0x7F=0x92\r\n");
 
     for (;;)
     {
@@ -334,7 +358,8 @@ void StartMainAppTask(void *argument)
         } while(0)
 
         /* (1) 순차 점등: U19→U30 백색 ON (200ms 간격) */
-        uart_log("[WAIT] Waiting for board (ee_present_safe)...\r\n");
+        uart_log("[STATE] A: 2단계 — 12개 PCB 삽입 대기\r\n");
+        uart_log("[WAIT] CS11(board_detect) 감지 대기 중...\r\n");
         led_all_off();
         for (uint8_t i = 0; i < SK9822_NUM_LEDS; i++) {
             led_set(i, 255, 255, 255);
@@ -343,7 +368,10 @@ void StartMainAppTask(void *argument)
         }
 
         /* (2) 패턴 A~H 순환 쇼, 보드 감지 시 즉시 탈출 */
-        bool board_found = ee_present_safe(0u);   /* 이미 꽂혀 있으면 즉시 탈출 */
+        /* DIAG 결과(g_detect_count==12)가 이미 있으면 즉시 통과 */
+        bool board_found = (g_detect_count == EE_NUM_CHIPS) || board_detect();
+        uart_log("[STATE] A: board_found=%u (detect_count=%u)\r\n",
+                 (unsigned)board_found, (unsigned)g_detect_count);
         uint8_t pal_idx = 0;
 
         while (!board_found)
@@ -354,11 +382,11 @@ void StartMainAppTask(void *argument)
                 uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
                 for (uint8_t i = 0; i < 12 && !board_found; i++) {
                     SHOW_BLINK(i, cr, cg, cb, cbr, 120, 30);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 for (int8_t i = 11; i >= 0 && !board_found; i--) {
                     SHOW_BLINK((uint8_t)i, cr, cg, cb, cbr, 120, 30);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -369,11 +397,11 @@ void StartMainAppTask(void *argument)
                 uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
                 for (uint8_t s = 0; s < 12 && !board_found; s++) {
                     SHOW_BLINK(patB[s], cr, cg, cb, cbr, 130, 30);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 for (int8_t s = 11; s >= 0 && !board_found; s--) {
                     SHOW_BLINK(patB[s], cr, cg, cb, cbr, 130, 30);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -398,7 +426,7 @@ void StartMainAppTask(void *argument)
                     for (uint8_t k = 0; k < 4 && diag[d][k] != 255; k++)
                         led_set(diag[d][k], 0, 0, 0);
                     led_update(); osDelay(50);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 /* 역방향 */
                 for (int8_t d = 5; d >= 0 && !board_found; d--) {
@@ -411,7 +439,7 @@ void StartMainAppTask(void *argument)
                     for (uint8_t k = 0; k < 4 && diag[d][k] != 255; k++)
                         led_set(diag[d][k], 0, 0, 0);
                     led_update(); osDelay(50);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -422,11 +450,11 @@ void StartMainAppTask(void *argument)
                 uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
                 for (uint8_t s = 0; s < 12 && !board_found; s++) {
                     SHOW_BLINK(patD[s], cr, cg, cb, cbr, 150, 30);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 for (int8_t s = 11; s >= 0 && !board_found; s--) {
                     SHOW_BLINK(patD[s], cr, cg, cb, cbr, 150, 30);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -437,11 +465,11 @@ void StartMainAppTask(void *argument)
                 uint8_t cr=PAT_COLOR.r, cg=PAT_COLOR.g, cb=PAT_COLOR.b, cbr=PAT_COLOR.br;
                 for (uint8_t s = 0; s < 12 && !board_found; s++) {
                     SHOW_BLINK(patE[s], cr, cg, cb, cbr, 140, 40);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 for (int8_t s = 11; s >= 0 && !board_found; s--) {
                     SHOW_BLINK(patE[s], cr, cg, cb, cbr, 140, 40);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -455,7 +483,7 @@ void StartMainAppTask(void *argument)
                     seed = seed * 1103515245U + 12345U;
                     uint8_t pos = (seed >> 16) % 12;
                     SHOW_BLINK(pos, cr, cg, cb, cbr, 60, 40);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -479,7 +507,7 @@ void StartMainAppTask(void *argument)
                     for (uint8_t c = 0; c < 4; c++)
                         led_set(rows[r][c], 0, 0, 0);
                     led_update(); osDelay(80);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 /* 열 스캔: col0={0,7,8}, col1={1,6,9}, col2={2,5,10}, col3={3,4,11} */
                 static const uint8_t cols[4][3] = {
@@ -495,7 +523,7 @@ void StartMainAppTask(void *argument)
                     for (uint8_t r = 0; r < 3; r++)
                         led_set(cols[c][r], 0, 0, 0);
                     led_update(); osDelay(80);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
             }
             pal_idx++;
@@ -519,7 +547,7 @@ void StartMainAppTask(void *argument)
                         led_set(off[k], 0, 0, 0);
                     led_update();
                     osDelay(300);
-                    board_found = ee_present_safe(0u);
+                    board_found = board_detect();
                 }
                 led_all_off();
             }
@@ -531,32 +559,16 @@ void StartMainAppTask(void *argument)
 
         } /* while (!board_found) */
 
-        uart_log("[WAIT] Board detected! Starting...\r\n");
+        uart_log("[STATE] A→D: Board detected!\r\n");
         led_all_off();
         osDelay(200);
 
-        /* ── 템플릿 로드 (최초 1회) ────────────────────────── */
-        if (!template_loaded) {
-            uart_log("[INIT] Loading template from CS%02u...\r\n", PROG_SRC_CS);
-            for (uint16_t a = 0u; a < 128u; a++)
-                g_src_data[a] = EE_Read(PROG_SRC_CS, a);
-            template_loaded = true;
-            uart_log("[INIT] Template loaded. addr 0x7F=0x%02X\r\n",
-                     g_src_data[0x7Fu]);
-            if (g_src_data[0x7Fu] != 0x91u && g_src_data[0x7Fu] != 0x92u)
-                uart_log("[INIT] WARNING: unexpected type byte (exp 0x91/0x92)\r\n");
-            /* 덤프 */
-            for (uint16_t a = 0u; a < 128u; a++) {
-                if ((a & 0x0Fu) == 0u) uart_log("  %03X: ", (unsigned)a);
-                uart_log("%02X ", g_src_data[a]);
-                if ((a & 0x0Fu) == 0x0Fu) uart_log("\r\n");
-            }
-        }
-
         /* ════════════════════════════════════════════════════════
          * 상태 D: 12개 칩 전체 프로그래밍 (CS00~CS11)
-         *   각 칩: EWEN → ERAL → Write 128B → EWDS → Verify
+         *   각 칩: EWEN → ERAL → Write 128B → EWDS → Verify + ID체크
          * ════════════════════════════════════════════════════════ */
+        uart_log("[STATE] D: PROGRAMMING  (template 0x7F=0x%02X)\r\n",
+                 g_src_data[0x7Fu]);
         uart_log("[PROG] Programming CS00~CS%02u (%u chips)...\r\n",
                  EE_NUM_CHIPS - 1u, EE_NUM_CHIPS);
         pass_cnt = 0u;
@@ -572,29 +584,31 @@ void StartMainAppTask(void *argument)
             EE_WriteEnable(i);
             if (!EE_EraseAll(i)) {
                 EE_WriteDisable(i);
-                led_set(i, 255, 0, 0); led_update();
-                uart_log("ERAL TOUT\r\n");
+                led_set(i, 255, 0, 0); led_update();   /* 적색: 실패 */
+                uart_log("FAIL (ERAL timeout)\r\n");
                 fail_cnt++;
                 continue;
             }
+            uart_log("ERAL OK → ");
 
             /* ── Write 128 bytes ── */
             bool wr_ok = true;
             for (uint16_t a = 0u; a < 128u && wr_ok; a++) {
                 if (!EE_Write(i, a, g_src_data[a])) {
-                    uart_log("WR TOUT a=0x%02X\r\n", (unsigned)a);
+                    uart_log("FAIL (WR timeout a=0x%02X)\r\n", (unsigned)a);
                     wr_ok = false;
                 }
             }
             EE_WriteDisable(i);
 
             if (!wr_ok) {
-                led_set(i, 255, 0, 0); led_update();
+                led_set(i, 255, 0, 0); led_update();   /* 적색: 실패 */
                 fail_cnt++;
                 continue;
             }
+            uart_log("WR OK → ");
 
-            /* ── Verify ── */
+            /* ── Verify (전체 128 bytes) ── */
             uint16_t err_cnt = 0u;
             for (uint16_t a = 0u; a < 128u; a++) {
                 uint8_t rd = EE_Read(i, a);
@@ -606,32 +620,60 @@ void StartMainAppTask(void *argument)
                 }
             }
 
-            prog_ok[i] = (err_cnt == 0u);
+            /* ── 외부장치 인식키 검증 (addr 0x7F == 템플릿) ── */
+            uint8_t id_byte = EE_Read(i, 0x7Fu);
+            bool id_ok = (id_byte == g_src_data[0x7Fu]);
+
+            prog_ok[i] = (err_cnt == 0u) && id_ok;
             if (prog_ok[i]) {
                 led_set(i, 0, 255, 0); led_update();   /* 녹색: 성공 */
                 pass_cnt++;
-                uart_log("OK\r\n");
+                uart_log("VFY OK  ID=0x%02X → PASS\r\n", id_byte);
             } else {
                 led_set(i, 255, 0, 0); led_update();   /* 적색: 실패 */
                 fail_cnt++;
-                uart_log("FAIL(err=%u)\r\n", (unsigned)err_cnt);
+                if (err_cnt > 0u)
+                    uart_log("VFY FAIL (err=%u) ID=0x%02X → FAIL\r\n",
+                             (unsigned)err_cnt, id_byte);
+                else
+                    uart_log("VFY OK  ID=0x%02X (exp 0x%02X) → FAIL\r\n",
+                             id_byte, g_src_data[0x7Fu]);
             }
         }
 
         /* 결과 요약 */
-        uart_log("[DONE] PASS=%u  FAIL=%u\r\n", pass_cnt, fail_cnt);
+        uart_log("[STATE] D: DONE  PASS=%u  FAIL=%u / %u\r\n",
+                 pass_cnt, fail_cnt, EE_NUM_CHIPS);
         if (fail_cnt > 0u) {
-            uart_log("[DONE] Failed chips: ");
+            uart_log("[DONE] Failed chips:");
             for (uint8_t i = 0u; i < EE_NUM_CHIPS; i++)
-                if (!prog_ok[i]) uart_log("CS%02u ", i);
+                if (!prog_ok[i]) uart_log(" CS%02u", i);
             uart_log("\r\n");
         } else {
-            uart_log("[DONE] All chips OK.\r\n");
+            uart_log("[DONE] All %u chips OK — ATMega will recognize.\r\n",
+                     EE_NUM_CHIPS);
         }
+
+        /* ── 프로그램 후 전체 덤프 (12개 칩 × 128 bytes) ────────── */
+        uart_log("\r\n[DUMP] ===== POST-PROGRAM READ-BACK =====\r\n");
+        for (uint8_t i = 0u; i < EE_NUM_CHIPS; i++) {
+            uart_log("[DUMP] CS%02u  (addr 0x7F=0x%02X) %s\r\n",
+                     i, EE_Read(i, 0x7Fu),
+                     prog_ok[i] ? "PASS" : "FAIL");
+            for (uint16_t a = 0u; a < 128u; a++) {
+                if ((a & 0x0Fu) == 0u)
+                    uart_log("  %02X: ", (unsigned)a);
+                uart_log("%02X ", EE_Read(i, a));
+                if ((a & 0x0Fu) == 0x0Fu)
+                    uart_log("\r\n");
+            }
+        }
+        uart_log("[DUMP] ===== END =====\r\n\r\n");
 
         /* ════════════════════════════════════════════════════════
          * 상태 E: 완료 → 보드 제거 대기
          * ════════════════════════════════════════════════════════ */
+        uart_log("[STATE] E: COMPLETE — remove board\r\n");
         voice_play(VOICE_COMPLETE);
         osDelay(300);
         if (fail_cnt > 0u) voice_play(VOICE_DEFECTIVE);
@@ -639,10 +681,10 @@ void StartMainAppTask(void *argument)
         uart_log("[WAIT] Remove the board...\r\n");
         voice_play(VOICE_REMOVE_BOARD);
 
-        /* ee_present_safe(CS00) 폴링으로 보드 제거 감지 */
+        /* CS00 addr 0x7F 읽기로 보드 제거 감지 (쓰기 없음 — 프로그래밍 결과 보존) */
         {
             uint8_t vc = 0u;
-            while (ee_present_safe(0u)) {
+            while (board_still_present_ro()) {
                 osDelay(500u);
                 if (++vc >= 60u) {
                     voice_play(VOICE_REMOVE_BOARD);
@@ -675,6 +717,12 @@ void StartDetectTask(void *argument)
     uint8_t prev_count = 0;
     uint8_t stable = 0;          /* 연속 동일 결과 횟수 */
 
+    /* 93C46 고정 설정: DIAG 실행 전에 반드시 설정해야
+     * addr=0 쓰기가 정확히 동작하고 addr 0x7F 가 손상되지 않음. */
+    g_chip_type = EE_CHIP_93C46;
+    g_addr_bits = 7;
+    g_num_addrs = 128;
+
     /* ── 시작 진단 (한 번만 실행) ────────────────────────────────
      * mainAppTask 가 UART 헤더를 출력하고 voice_play 에 진입한 후
      * 실행되도록 500ms 대기. BelowNormal 우선순위이므로 Normal 태스크가
@@ -682,14 +730,14 @@ void StartDetectTask(void *argument)
     osDelay(500);
     uart_log("[DIAG] === Start ===\r\n");
 
-    /* 2. 칩별 EWEN + Write(0xA5,addr255) + Read 단계별 진단
+    /* 2. 칩별 EWEN + Write(0xA5,addr0) + Read 단계별 진단
+     *    addr255 → addr0 변경: addr 0x7F (ATMega 인식키) 손상 방지
      *    WR=TOUT → ee_wait_ready() 타임아웃 (DO 가 H 로 안 올라옴)
      *    WR=OK, RB≠0xA5 → 쓰기는 됐지만 읽기 값 불일치
      *    WR=OK, RB=0xA5 → DETECTED 정상 */
     /* 진단/감지에서 스킵할 슬롯 비트마스크.
-     * bit N = 1 이면 CS(N) 슬롯을 타임아웃 없이 건너뜀.
-     * CS00(bit0) = 클론 소스: 원본 데이터 보호를 위해 쓰기 금지. */
-#define EE_CHIP_SKIP_MASK  0x0001u   /* CS00 쓰기 완전 금지 */
+     * bit N = 1 이면 CS(N) 슬롯을 타임아웃 없이 건너뜀. */
+#define EE_CHIP_SKIP_MASK  0x0000u   /* 모든 칩 포함 (CS00 포함) */
 
     /* 진단 중 TOUT 칩도 감지 루프에서 스킵 (20ms 낭비 방지).
      * 진단 후 EE_CHIP_SKIP_MASK | tout_mask 를 사용. */
@@ -704,10 +752,10 @@ void StartDetectTask(void *argument)
             continue;
         }
         EE_WriteEnable(di);
-        bool    wr_ok = EE_Write(di, 255, 0xA5);
+        bool    wr_ok = EE_Write(di, 0u, 0xA5u);   /* addr 0: ATMega 인식키(0x7F) 손상 방지 */
         uint8_t rb    = 0xFF;
         if (wr_ok) {
-            rb = EE_Read(di, 255);
+            rb = EE_Read(di, 0u);
             if (diag_first_ok == 0xFF)
                 diag_first_ok = di;
         } else {
@@ -720,15 +768,6 @@ void StartDetectTask(void *argument)
                  rb,
                  (wr_ok && rb == 0xA5) ? "DETECTED" : "---");
     }
-    /* CS00(클론 소스): 쓰기 없이 읽기로만 확인 — 원본 데이터 무손상.
-     * tout_mask bit0 는 유지 → 주기 루프 EE_Detect(0) 도 영구 차단.
-     * g_detected[0] 는 아래 결과 블록에서 직접 true 로 설정. */
-    {
-        uint8_t rd_test = EE_Read(0u, 255u);
-        uart_log("[DIAG] CS00(SRC): READ-ONLY addr255=0x%02X → PRESENT (write blocked)\r\n",
-                 rd_test);
-    }
-
     uart_log("[DIAG] === Diagnostic End (detect_skip=0x%04X) ===\r\n",
              (unsigned)tout_mask);
     g_skip_mask = tout_mask;   /* mainAppTask 에서 사용 */
@@ -737,8 +776,7 @@ void StartDetectTask(void *argument)
     {
         uint8_t chip_cnt = 0;
         for (uint8_t di = 0; di < EE_NUM_CHIPS; di++) {
-            /* CS00(SRC)는 쓰기 감지 없이 항상 존재로 처리 */
-            bool ok = (di == 0u) ? true : !(tout_mask & (1u << di));
+            bool ok = !(tout_mask & (1u << di));
             g_detected[di] = ok;
             if (ok) chip_cnt++;
         }
@@ -749,22 +787,12 @@ void StartDetectTask(void *argument)
     }
 
     if (diag_first_ok == 0xFF) {
-        uart_log("[DIAG] No chips detected — skipping verify/ID\r\n");
+        uart_log("[DIAG] No chips detected — 93C46 fixed\r\n");
     } else {
         uint8_t fc = diag_first_ok;
 
-        /* 클론 소스(CS00=0)를 보호: 파괴적 쓰기는 CS00이 아닌 다른 칩 우선 사용.
-         * CS01 이상 중 첫 번째로 응답한 칩을 id_chip으로 선택.
-         * 다른 칩이 없으면 부득이 fc(CS00) 사용. */
-        uint8_t id_chip = fc;  /* 기본값: 없으면 폴백 */
-        for (uint8_t _di = 1u; _di < EE_NUM_CHIPS; _di++) {
-            if (!(tout_mask & (1u << _di))) {
-                id_chip = _di;
-                break;
-            }
-        }
-        uart_log("[DIAG] ID writes → CS%u%s\r\n", id_chip,
-                 (id_chip != 0u) ? " (SRC 보호)" : " (폴백: CS00)");
+        uint8_t id_chip = fc;   /* write-verify 대상: 첫 번째 응답 칩 */
+        uart_log("[DIAG] ID writes → CS%u\r\n", id_chip);
 
         /* 쓰기 실제 동작 확인: id_chip 에 0x5A 쓰기 후 읽기
          * - RB=0x5A → 쓰기 정상
@@ -773,18 +801,31 @@ void StartDetectTask(void *argument)
         uart_log("[DIAG] -- Write verify (CS%u, 0x5A) --\r\n", id_chip);
         {
             EE_WriteEnable(id_chip);
-            bool w2 = EE_Write(id_chip, 255, 0x5A);
-            uint8_t rb2 = w2 ? EE_Read(id_chip, 255) : 0xFF;
+            bool w2 = EE_Write(id_chip, 0u, 0x5Au);   /* addr 0 사용 */
+            uint8_t rb2 = w2 ? EE_Read(id_chip, 0u) : 0xFF;
             EE_WriteDisable(id_chip);
             uart_log("[DIAG] WR=%-4s  RB=0x%02X  %s\r\n",
                      w2 ? "OK" : "TOUT", rb2,
                      (w2 && rb2 == 0x5A) ? "WR OK" : "MISMATCH");
         }
 
-        /* 3. 칩 종류: 93C46 고정 (7-bit addr, 128 bytes) */
-        g_chip_type = EE_CHIP_93C46; g_addr_bits = 7; g_num_addrs = 128;
         uart_log("[DIAG] -- Chip type: 93C46 (fixed, 7-bit addr, 128 bytes) --\r\n");
     }
+
+    /* ── DUMP: 감지된 모든 칩의 128바이트 내용 출력 ── */
+    uart_log("[DUMP] === Content after DIAG ===\r\n");
+    for (uint8_t di = 0; di < EE_NUM_CHIPS; di++) {
+        if (tout_mask & (1u << di)) continue;   /* TOUT 칩 스킵 */
+        uart_log("[DUMP] CS%02u:\r\n", di);
+        for (uint16_t a = 0u; a < 128u; a++) {
+            if ((a & 0x0Fu) == 0u)
+                uart_log("  %02X: ", (unsigned)a);
+            uart_log("%02X ", EE_Read(di, a));
+            if ((a & 0x0Fu) == 0x0Fu)
+                uart_log("\r\n");
+        }
+    }
+    uart_log("[DUMP] === End ===\r\n");
 
     for (;;)
     {
@@ -807,8 +848,6 @@ void StartDetectTask(void *argument)
             det[i] = EE_Detect(i);
             if (det[i]) count++;
         }
-        /* CS00(SRC): 쓰기 금지 — EE_Detect 없이 항상 존재로 처리 */
-        if (!det[0]) { det[0] = true; count++; }
 
         /* 안정 확인: 3회 연속 동일 결과여야 반영 */
         if (count == prev_count) {
